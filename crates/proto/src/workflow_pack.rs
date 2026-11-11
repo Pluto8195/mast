@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::work_outline_templates::TemplateNode;
+use crate::work_outline_templates::{TemplateNode, template_limits};
 
 pub const WORKFLOW_PACK_FORMAT: &str = "mast.workflow-pack/v1";
 
@@ -71,6 +71,15 @@ impl WorkflowPack {
             if name.is_empty() || !names.insert(name.to_lowercase()) {
                 return Err("A workflow pack contains an empty or duplicate template name".into());
             }
+            if name.chars().count() > template_limits::MAX_TEMPLATE_NAME_CHARS {
+                return Err("A workflow pack template name is too long".into());
+            }
+            template.body.check_limits()?;
+            let body = serde_json::to_string(&template.body)
+                .map_err(|_| "A workflow pack template cannot be encoded")?;
+            if body.encode_utf16().count() > template_limits::MAX_TEMPLATE_BODY_UTF16_UNITS {
+                return Err("A workflow pack template body is too large".into());
+            }
         }
         Ok(())
     }
@@ -114,6 +123,23 @@ mod tests {
                 },
             ],
             templates: vec![],
+        };
+        assert!(pack.validate().is_err());
+    }
+
+    #[test]
+    fn oversized_template_body_is_rejected() {
+        let pack = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![],
+            templates: vec![WorkflowPackTemplate {
+                name: "Template".into(),
+                body: TemplateNode {
+                    title: "x".repeat(template_limits::MAX_TEMPLATE_BODY_UTF16_UNITS),
+                    ..Default::default()
+                },
+            }],
         };
         assert!(pack.validate().is_err());
     }
