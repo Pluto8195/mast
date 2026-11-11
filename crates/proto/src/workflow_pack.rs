@@ -45,6 +45,47 @@ pub struct WorkflowPack {
     pub templates: Vec<WorkflowPackTemplate>,
 }
 
+/// A comparison of one incoming instruction scope with the destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPackScopeChange {
+    pub item_path: Vec<String>,
+    pub current: Option<Vec<String>>,
+    pub incoming: Vec<String>,
+}
+
+/// Compare portable scopes without making any registry writes. Both inputs must
+/// have unique paths; otherwise a name match would silently select a target.
+pub fn compare_instruction_scopes(
+    incoming: &WorkflowPack,
+    current: &WorkflowPack,
+) -> Result<Vec<WorkflowPackScopeChange>, String> {
+    incoming.validate()?;
+    current.validate()?;
+    fn normalized(path: &[String]) -> Vec<String> {
+        path.iter().map(|part| part.trim().to_lowercase()).collect()
+    }
+    let by_path: std::collections::HashMap<_, _> = current
+        .scopes
+        .iter()
+        .map(|scope| (normalized(&scope.item_path), scope))
+        .collect();
+    Ok(incoming
+        .scopes
+        .iter()
+        .filter_map(|scope| {
+            let existing = by_path.get(&normalized(&scope.item_path));
+            if existing.is_some_and(|existing| existing.instructions == scope.instructions) {
+                return None;
+            }
+            Some(WorkflowPackScopeChange {
+                item_path: scope.item_path.clone(),
+                current: existing.map(|existing| existing.instructions.clone()),
+                incoming: scope.instructions.clone(),
+            })
+        })
+        .collect())
+}
+
 impl WorkflowPack {
     /// Reject unsupported versions and ambiguous scope or template names.
     pub fn validate(&self) -> Result<(), String> {
@@ -142,5 +183,35 @@ mod tests {
             }],
         };
         assert!(pack.validate().is_err());
+    }
+
+    #[test]
+    fn comparison_identifies_additions_and_conflicts_by_path() {
+        let current = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![WorkflowPackScope {
+                item_path: vec!["Tasks".into()],
+                instructions: vec!["Mine".into()],
+            }],
+            templates: vec![],
+        };
+        let incoming = WorkflowPack {
+            scopes: vec![
+                WorkflowPackScope {
+                    item_path: vec!["tasks".into()],
+                    instructions: vec!["Theirs".into()],
+                },
+                WorkflowPackScope {
+                    item_path: vec![],
+                    instructions: vec!["Root".into()],
+                },
+            ],
+            ..current.clone()
+        };
+        let changes = compare_instruction_scopes(&incoming, &current).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].current, Some(vec!["Mine".into()]));
+        assert_eq!(changes[1].current, None);
     }
 }
