@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::work_outline::WorkOutlineSnapshot;
 use crate::work_outline_templates::{TemplateNode, template_limits};
 
 pub const WORKFLOW_PACK_FORMAT: &str = "mast.workflow-pack/v1";
@@ -43,6 +44,73 @@ pub struct WorkflowPack {
     pub mode: WorkflowPackMode,
     pub scopes: Vec<WorkflowPackScope>,
     pub templates: Vec<WorkflowPackTemplate>,
+}
+
+/// Collect candidate content for review. This does not perform secret removal
+/// or authorize writing the result to disk.
+pub fn collect_workflow_pack_candidate(
+    snapshot: &WorkOutlineSnapshot,
+) -> Result<WorkflowPack, String> {
+    if !snapshot.available || !snapshot.synced {
+        return Err("The Space is not available and synchronized".into());
+    }
+    let mut scopes: Vec<WorkflowPackScope> = Vec::new();
+    let mut scope_indices = std::collections::HashMap::new();
+    for instruction in snapshot
+        .instructions
+        .iter()
+        .filter(|instruction| !instruction.archived())
+    {
+        let mut path = Vec::new();
+        let mut cursor = instruction.work_item_id.as_deref();
+        let mut visited = std::collections::HashSet::new();
+        let mut excluded = false;
+        while let Some(id) = cursor {
+            if !visited.insert(id) {
+                return Err("An instruction scope has a cyclic item path".into());
+            }
+            let item = snapshot
+                .item(id)
+                .ok_or("An instruction scope has a missing item")?;
+            if item.archived_at.is_some() {
+                excluded = true;
+                break;
+            }
+            path.push(item.title.clone());
+            cursor = item.parent_work_item_id.as_deref();
+        }
+        if excluded {
+            continue;
+        }
+        path.reverse();
+        let index = *scope_indices
+            .entry(instruction.work_item_id.clone())
+            .or_insert_with(|| {
+                let index = scopes.len();
+                scopes.push(WorkflowPackScope {
+                    item_path: path,
+                    instructions: Vec::new(),
+                });
+                index
+            });
+        scopes[index].instructions.push(instruction.text.clone());
+    }
+    let templates = snapshot
+        .templates
+        .iter()
+        .map(|template| WorkflowPackTemplate {
+            name: template.name.clone(),
+            body: template.body.clone(),
+        })
+        .collect();
+    let pack = WorkflowPack {
+        format: WORKFLOW_PACK_FORMAT.into(),
+        mode: WorkflowPackMode::Full,
+        scopes,
+        templates,
+    };
+    pack.validate()?;
+    Ok(pack)
 }
 
 /// A comparison of one incoming instruction scope with the destination.
@@ -213,5 +281,30 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].current, Some(vec!["Mine".into()]));
         assert_eq!(changes[1].current, None);
+    }
+
+    #[test]
+    fn candidate_uses_paths_and_excludes_archived_scopes() {
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "space", "available": true, "synced": true,
+            "items": [
+                {"id":"parent", "spaceId":"space", "title":"Parent"},
+                {"id":"child", "spaceId":"space", "title":"Child", "parentWorkItemId":"parent"},
+                {"id":"archived", "spaceId":"space", "title":"Archived", "archivedAt":1}
+            ],
+            "instructions": [
+                {"id":"one", "text":"first"},
+                {"id":"two", "workItemId":"child", "text":"second"},
+                {"id":"three", "workItemId":"archived", "text":"hidden"}
+            ]
+        }))
+        .unwrap();
+        let pack = collect_workflow_pack_candidate(&snapshot).unwrap();
+        assert_eq!(pack.scopes.len(), 2);
+        assert_eq!(pack.scopes[0].item_path, Vec::<String>::new());
+        assert_eq!(pack.scopes[1].item_path, vec!["Parent", "Child"]);
+        let json = serde_json::to_string(&pack).unwrap();
+        assert!(!json.contains("archived"));
+        assert!(!json.contains("workItemId"));
     }
 }
