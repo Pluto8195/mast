@@ -9,6 +9,92 @@ use crate::work_outline_templates::{TemplateNode, template_limits};
 
 pub const WORKFLOW_PACK_FORMAT: &str = "mast.workflow-pack/v1";
 
+/// One detected replacement. `location` is a JSON pointer in the pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowPackRedaction {
+    pub location: String,
+    pub category: String,
+    pub removed: String,
+}
+
+/// Prepare a redacted candidate and a review list; this does not write files.
+/// Pattern matching is incomplete and the result still needs human review.
+pub fn redact_workflow_pack(
+    pack: &WorkflowPack,
+    mode: WorkflowPackMode,
+) -> Result<(WorkflowPack, Vec<WorkflowPackRedaction>), String> {
+    use regex::Regex;
+    let secret = Regex::new(r"(?i)\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|(?:token|api[_-]?key|password|secret)\s*[:=]\s*[^\s,;]+)").unwrap();
+    let email = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").unwrap();
+    let home = Regex::new(r#"(?:/Users/|/home/|~/)[^\s"'<>]+"#).unwrap();
+    let mut rules = vec![("credential", secret)];
+    if mode == WorkflowPackMode::Share {
+        rules.push(("email", email));
+        rules.push(("home path", home));
+    }
+    let mut value = serde_json::to_value(pack).map_err(|error| error.to_string())?;
+    let mut redactions = Vec::new();
+    fn walk(
+        value: &mut serde_json::Value,
+        path: &str,
+        rules: &[(&str, Regex)],
+        out: &mut Vec<WorkflowPackRedaction>,
+    ) {
+        match value {
+            serde_json::Value::String(text) => {
+                for (category, pattern) in rules {
+                    let matches: Vec<_> = pattern
+                        .find_iter(text)
+                        .filter(|m| !m.is_empty())
+                        .map(|m| m.as_str().to_owned())
+                        .collect();
+                    for removed in matches {
+                        out.push(WorkflowPackRedaction {
+                            location: path.into(),
+                            category: (*category).into(),
+                            removed,
+                        });
+                    }
+                    *text = pattern.replace_all(text, "[redacted]").into_owned();
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter_mut().enumerate() {
+                    walk(item, &format!("{path}/{index}"), rules, out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, item) in fields {
+                    walk(
+                        item,
+                        &format!("{path}/{}", key.replace('~', "~0").replace('/', "~1")),
+                        rules,
+                        out,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    // The format and mode are metadata, not user content.
+    if let Some(object) = value.as_object_mut() {
+        for field in ["scopes", "templates"] {
+            if let Some(content) = object.get_mut(field) {
+                walk(content, &format!("/{field}"), &rules, &mut redactions);
+            }
+        }
+        object.insert(
+            "mode".into(),
+            serde_json::to_value(mode).map_err(|error| error.to_string())?,
+        );
+    }
+    let redacted: WorkflowPack =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    redacted.validate()?;
+    Ok((redacted, redactions))
+}
+
 /// An explicitly selected export mode. Both modes exclude credential stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,5 +392,34 @@ mod tests {
         let json = serde_json::to_string(&pack).unwrap();
         assert!(!json.contains("archived"));
         assert!(!json.contains("workItemId"));
+    }
+
+    #[test]
+    fn share_redaction_lists_removed_values_and_full_removes_credentials() {
+        let pack = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![WorkflowPackScope {
+                item_path: vec![],
+                instructions: vec![
+                    "Reach user@example.org at /Users/example/work token=abcdef0123456789".into(),
+                ],
+            }],
+            templates: vec![],
+        };
+        let (share, removed) = redact_workflow_pack(&pack, WorkflowPackMode::Share).unwrap();
+        assert_eq!(removed.len(), 3);
+        assert!(
+            removed
+                .iter()
+                .all(|entry| entry.location == "/scopes/0/instructions/0")
+        );
+        let result = &share.scopes[0].instructions[0];
+        assert!(!result.contains("example.org"));
+        assert!(!result.contains("/Users/example"));
+        assert!(!result.contains("abcdef0123456789"));
+        let (full, _) = redact_workflow_pack(&pack, WorkflowPackMode::Full).unwrap();
+        assert!(full.scopes[0].instructions[0].contains("user@example.org"));
+        assert!(!full.scopes[0].instructions[0].contains("abcdef0123456789"));
     }
 }

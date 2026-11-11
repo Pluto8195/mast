@@ -5283,6 +5283,7 @@ version = "0.2.82"
 dependencies = [
  "chrono",
  "ctor",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
