@@ -32,6 +32,7 @@ pub mod work_outline_launch;
 pub mod work_outline_order;
 pub mod work_outline_templates;
 pub mod work_outline_user_actions;
+pub mod workflow_pack;
 pub mod message_source;
 pub mod workspace;
 
