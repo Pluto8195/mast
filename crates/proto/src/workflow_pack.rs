@@ -207,6 +207,72 @@ pub struct WorkflowPackScopeChange {
     pub incoming: Vec<String>,
 }
 
+/// An instruction scope resolved against a destination snapshot. IDs are
+/// ephemeral preview data and are never serialized into a pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPackScopePreview {
+    pub item_path: Vec<String>,
+    pub work_item_id: Option<String>,
+    pub current: Vec<String>,
+    pub incoming: Vec<String>,
+}
+
+/// Resolve each path without creating items or guessing among duplicate names.
+pub fn preview_instruction_import(
+    pack: &WorkflowPack,
+    snapshot: &WorkOutlineSnapshot,
+) -> Result<Vec<WorkflowPackScopePreview>, String> {
+    pack.validate()?;
+    if !snapshot.available || !snapshot.synced {
+        return Err("The destination Space is not available and synchronized".into());
+    }
+    let mut result = Vec::new();
+    for scope in &pack.scopes {
+        let mut parent: Option<&str> = None;
+        for title in &scope.item_path {
+            let matches: Vec<_> = snapshot
+                .items
+                .iter()
+                .filter(|item| {
+                    item.archived_at.is_none()
+                        && item.parent_work_item_id.as_deref() == parent
+                        && item.title.trim().to_lowercase() == title.trim().to_lowercase()
+                })
+                .collect();
+            match matches.as_slice() {
+                [item] => parent = Some(item.id.as_str()),
+                [] => {
+                    return Err(format!(
+                        "Destination item not found: {}",
+                        scope.item_path.join(" / ")
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "Destination item path is ambiguous: {}",
+                        scope.item_path.join(" / ")
+                    ));
+                }
+            }
+        }
+        let current = snapshot
+            .instructions
+            .iter()
+            .filter(|instruction| {
+                !instruction.archived() && instruction.work_item_id.as_deref() == parent
+            })
+            .map(|instruction| instruction.text.clone())
+            .collect();
+        result.push(WorkflowPackScopePreview {
+            item_path: scope.item_path.clone(),
+            work_item_id: parent.map(str::to_owned),
+            current,
+            incoming: scope.instructions.clone(),
+        });
+    }
+    Ok(result)
+}
+
 /// Compare portable scopes without making any registry writes. Both inputs must
 /// have unique paths; otherwise a name match would silently select a target.
 pub fn compare_instruction_scopes(
@@ -421,5 +487,36 @@ mod tests {
         let (full, _) = redact_workflow_pack(&pack, WorkflowPackMode::Full).unwrap();
         assert!(full.scopes[0].instructions[0].contains("user@example.org"));
         assert!(!full.scopes[0].instructions[0].contains("abcdef0123456789"));
+    }
+
+    #[test]
+    fn preview_rejects_ambiguous_destination_paths() {
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "destination", "available": true, "synced": true,
+            "items": [
+                {"id":"one", "spaceId":"destination", "title":"Tasks"},
+                {"id":"two", "spaceId":"destination", "title":"tasks"}
+            ]
+        }))
+        .unwrap();
+        let pack = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![WorkflowPackScope {
+                item_path: vec!["Tasks".into()],
+                instructions: vec!["Rule".into()],
+            }],
+            templates: vec![],
+        };
+        assert!(
+            preview_instruction_import(&pack, &snapshot)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        let mut unique = snapshot;
+        unique.items.pop();
+        let preview = preview_instruction_import(&pack, &unique).unwrap();
+        assert_eq!(preview[0].work_item_id.as_deref(), Some("one"));
+        assert_eq!(preview[0].incoming, vec!["Rule"]);
     }
 }
