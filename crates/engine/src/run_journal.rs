@@ -74,6 +74,9 @@ pub struct InstructionSidecar {
     /// Turn pins by user message id, oldest first.
     #[serde(default)]
     pub turns: Vec<InstructionTurnPin>,
+    /// Skill files read by this chat and the last mtime observed or announced.
+    #[serde(default)]
+    pub skill_mtimes: std::collections::BTreeMap<PathBuf, u128>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +103,28 @@ impl InstructionSidecar {
 }
 
 impl RunJournal {
+    pub fn record_skill_read(&self, chat_id: &str, path: &Path) -> Result<(), JournalError> {
+        let Some(mtime) = skill_mtime(path) else { return Ok(()); };
+        self.update_instruction_sidecar(chat_id, |sidecar| {
+            sidecar.skill_mtimes.insert(path.to_owned(), mtime) != Some(mtime)
+        })
+    }
+
+    pub fn skill_change_notices(&self, chat_id: &str) -> Result<Vec<String>, JournalError> {
+        let mut notices = Vec::new();
+        self.update_instruction_sidecar(chat_id, |sidecar| {
+            for (path, observed) in &mut sidecar.skill_mtimes {
+                if let Some(mtime) = skill_mtime(path) && mtime > *observed {
+                    if let Some(name) = path.parent().and_then(Path::file_name).and_then(|s| s.to_str()) {
+                        notices.push(format!("{name} skill changed since you loaded it; re-read it."));
+                        *observed = mtime;
+                    }
+                }
+            }
+            !notices.is_empty()
+        })?;
+        Ok(notices)
+    }
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, JournalError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
@@ -585,6 +610,10 @@ impl RunJournal {
     }
 }
 
+fn skill_mtime(path: &Path) -> Option<u128> {
+    std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|duration| duration.as_nanos())
+}
+
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
 fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
     let file = match File::open(path) {
@@ -871,6 +900,28 @@ mod tests {
             revision_id: id.into(),
             revision_hash: format!("{id}-hash"),
         }
+    }
+
+    #[test]
+    fn skill_change_notice_is_delivered_once_per_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("planner");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, "skill").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_times(std::fs::FileTimes::new().set_modified(base)).unwrap();
+        let journal = RunJournal::open(dir.path().join("journals")).unwrap();
+        journal.record_skill_read("chat", &path).unwrap();
+        assert!(journal.skill_change_notices("chat").unwrap().is_empty());
+        file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(1))).unwrap();
+        assert_eq!(journal.skill_change_notices("chat").unwrap(), ["planner skill changed since you loaded it; re-read it."]);
+        assert!(journal.skill_change_notices("chat").unwrap().is_empty());
+        let reopened = RunJournal::open(dir.path().join("journals")).unwrap();
+        assert!(reopened.skill_change_notices("chat").unwrap().is_empty());
+        file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(2))).unwrap();
+        assert_eq!(reopened.skill_change_notices("chat").unwrap().len(), 1);
     }
 
     #[test]

@@ -256,6 +256,39 @@ fn reported_model(harness: HarnessId, model: &str) -> Option<&str> {
         .then_some(model)
 }
 
+fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let candidates: Vec<String> = match call {
+        mast_proto::ToolCall::ReadFile { path } => vec![path.clone()],
+        mast_proto::ToolCall::Unknown { name, input } if name.eq_ignore_ascii_case("read") => input.as_ref()
+            .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
+            .and_then(|v| v.as_str()).map(|s| vec![s.to_owned()]).unwrap_or_default(),
+        mast_proto::ToolCall::Exec { command } => {
+            if command.contains(['|', ';', '&', '\n', '`', '$', '>', '<']) { return Vec::new(); }
+            match shell_words::split(command) {
+                Ok(words) if words.first().is_some_and(|s| matches!(s.as_str(), "cat" | "sed" | "head" | "tail")) => words.into_iter().skip(1).collect(),
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    };
+    candidates.into_iter().filter_map(|candidate| {
+        let path = if let Some(relative) = candidate.strip_prefix("~/") { home.join(relative) } else { candidate.into() };
+        let relative = path.strip_prefix(home).ok()?;
+        let parts: Vec<_> = relative.components().collect();
+        if parts.len() != 4 || !matches!(parts[0].as_os_str().to_str(), Some(".agents" | ".claude"))
+            || parts[1].as_os_str() != "skills" || parts[3].as_os_str() != "SKILL.md"
+            || !matches!(parts[2], std::path::Component::Normal(_)) { return None; }
+        Some(path)
+    }).collect()
+}
+
+fn prepend_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> String {
+    match journal.skill_change_notices(chat_id) {
+        Ok(notices) if !notices.is_empty() => format!("{}\n{}", notices.join("\n"), prompt),
+        _ => prompt.to_owned(),
+    }
+}
+
 impl SessionsEngine {
     /// Read-side backfill for chats that ran before `actual_model` existed:
     /// fill it from the `SessionStarted` events the run journal kept. Only
@@ -937,6 +970,7 @@ impl SessionsEngine {
             plan.resume = None;
             plan.transition = InstructionTransition::Fresh;
         }
+        request.prompt = prepend_skill_notices(&self.inner.journal, chat_id, &request.prompt);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1197,6 +1231,8 @@ impl SessionsEngine {
         let Some((run_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        let prompt = prepend_skill_notices(&self.inner.journal, chat_id, prompt);
+        let prompt = prompt.as_str();
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
             prompt: prompt.to_string(),
@@ -2846,6 +2882,7 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut skill_read_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Durable PR links (ticket 0xx): tool-call ids whose invocation looked
     // like a PR-creation command (`gh pr create` per `chat_links::
     // looks_like_pr_create`) — correlated against the matching `ToolResult`
@@ -3488,6 +3525,13 @@ async fn drive_run(
         if let Some(workspace) = inner.workspace() {
             match &event {
                 AgentEvent::ToolCall { id, call } => {
+                    if skill_read_tools.insert(id.clone()) {
+                        for path in skill_read_paths(call, &crate::repos::home_dir()) {
+                            if let Err(error) = inner.journal.record_skill_read(&chat_id, &path) {
+                                tracing::warn!(%error, "could not record skill read");
+                            }
+                        }
+                    }
                     let text = crate::chat_links::tool_call_invocation_text(call);
                     if crate::chat_links::looks_like_pr_create(&text) {
                         pr_create_tool_ids.insert(id.clone());
@@ -4070,6 +4114,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn skill_reads_accept_only_direct_skill_paths() {
+        let home = std::path::Path::new("/home/test");
+        let expected = home.join(".agents/skills/planner/SKILL.md");
+        assert_eq!(skill_read_paths(&mast_proto::ToolCall::ReadFile { path: "~/.agents/skills/planner/SKILL.md".into() }, home), vec![expected.clone()]);
+        assert_eq!(skill_read_paths(&mast_proto::ToolCall::Exec { command: "cat ~/.agents/skills/planner/SKILL.md".into() }, home), vec![expected]);
+        assert!(skill_read_paths(&mast_proto::ToolCall::Exec { command: "cat ~/.agents/skills/planner/SKILL.md | head".into() }, home).is_empty());
+        assert!(skill_read_paths(&mast_proto::ToolCall::ReadFile { path: "~/.agents/skills/../SKILL.md".into() }, home).is_empty());
     }
 
     #[test]
