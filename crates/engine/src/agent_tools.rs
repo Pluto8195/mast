@@ -570,6 +570,8 @@ struct ReadSubtreeArgs {
     max_depth: Option<u32>,
     #[serde(default)]
     include_archived: bool,
+    #[serde(default)]
+    include_completed: bool,
 }
 
 /// The engine-internal `chat_launch_child_for_item` arguments: the work item
@@ -2387,6 +2389,7 @@ impl AgentToolsService {
             sessions: sessions.as_ref(),
             requests: &requests,
             include_archived: args.include_archived,
+            include_completed: args.include_completed,
             max_depth,
         };
         let mut count = 0usize;
@@ -2400,6 +2403,7 @@ impl AgentToolsService {
             "workItemId": target,
             "maxDepth": max_depth,
             "includeArchived": args.include_archived,
+            "includeCompleted": args.include_completed,
             "itemCount": count,
             "truncated": truncated,
             "tree": tree,
@@ -2532,10 +2536,30 @@ struct SubtreeWalk<'a> {
     sessions: Option<&'a SessionsEngine>,
     requests: &'a HashMap<&'a str, Vec<&'a mast_proto::UserActionRequestView>>,
     include_archived: bool,
+    include_completed: bool,
     max_depth: u32,
 }
 
 impl SubtreeWalk<'_> {
+    /// Keep completed ancestors when their visible subtree contains work needing attention.
+    fn has_attention(&self, item: &mast_proto::WorkItemView) -> bool {
+        if self.requests.contains_key(item.id.as_str()) {
+            return true;
+        }
+        if item.chat_ids.iter().any(|id| {
+            self.workspace.chat(id).ok().flatten().is_some_and(|chat| {
+                !chat.archived && self.sessions.and_then(|s| s.session_status(id)).is_some_and(|session| {
+                    matches!(session.status, mast_proto::SessionStatus::Working | mast_proto::SessionStatus::AwaitingInput)
+                })
+            })
+        }) {
+            return true;
+        }
+        item.child_ids.iter().filter_map(|id| self.snapshot.item(id))
+            .filter(|child| self.include_archived || child.archived_at.is_none())
+            .any(|child| self.has_attention(child))
+    }
+
     /// The nested node for `id` (depth 0 = the read's root), depth-first in
     /// outline order; `None` once [`MAX_SUBTREE_ITEMS`] is reached (which
     /// also sets `truncated`).
@@ -2546,11 +2570,19 @@ impl SubtreeWalk<'_> {
             return None;
         }
         *count += 1;
+        let mut completed_omitted = 0usize;
         let visible_children: Vec<&str> = item
             .child_ids
             .iter()
             .filter_map(|child| self.snapshot.item(child))
             .filter(|child| self.include_archived || child.archived_at.is_none())
+            .filter(|child| {
+                let omit = !self.include_completed
+                    && child.effective_status == mast_proto::WorkItemEffectiveStatus::Completed
+                    && !self.has_attention(child);
+                completed_omitted += usize::from(omit);
+                !omit
+            })
             .map(|child| child.id.as_str())
             .collect();
         let mut children = Vec::new();
@@ -2591,6 +2623,7 @@ impl SubtreeWalk<'_> {
                 }))
                 .collect::<Vec<_>>(),
             "children": children,
+            "completedOmitted": completed_omitted,
         });
         if item.archived_at.is_some() {
             node["archived"] = json!(true);
