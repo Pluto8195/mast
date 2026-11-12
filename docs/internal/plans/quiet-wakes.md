@@ -44,9 +44,10 @@ Project-scoped read reach exists in `crates/mcp/src/tools.rs`; `send_message` is
 
 ## Recommendation, separate branches
 
-1. **A and B together:** the replay identifies eight conservative historical batches (1,515 output tokens), or ten under a less conservative status assumption. Keep A and B independently reviewable if their changes can be separated cleanly; either way preserve explicit actionable reports and user-triggered delivery. Cache-read savings remain unmeasured.
-2. **D and E:** fix project reach and answer routing as separate branches. The snapshot directly shows relay and concurrent-editor friction, but does not quantify token savings.
-3. **F:** trim outline reads on its own branch after measuring actual response size and call frequency. Its potential savings are unmeasured and depend on whether the coordinator actually reads the omitted rows.
-4. **C:** defer Jev until a labeled and model-scored sample establishes useful precision and latency. The present sample shows a no-question heuristic is unsafe, and there is no measured confidence threshold or savings estimate.
+1. **A:** use a separate branch for typed reports; five conservative historical batches used 1,174 output tokens. Preserve explicit actionable reports and user-triggered delivery.
+2. **B:** use a separate branch for informational events; three resolved-only batches used 341 output tokens. Preserve per-kind settings.
+3. **D and E:** use separate branches for project reach and answer routing. The snapshot directly shows relay and concurrent-editor friction, but does not quantify token savings.
+4. **F:** use a separate branch to trim outline reads after measuring response size and call frequency. Potential savings are unmeasured and depend on whether the coordinator reads the omitted rows.
+5. **C:** defer Jev until a labeled and model-scored sample establishes useful precision and latency; if pursued, use its own branch. The present sample shows a no-question heuristic is unsafe, and there is no measured confidence threshold or savings estimate.
 
 Ranking after A/B is by demonstrated operational friction, not measured token savings; the missing cache-read data prevents a defensible savings ranking across the proposals.
