@@ -155,9 +155,13 @@ debug = "line-tables-only"
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
+# Line tables keep file:line in backtraces at a fraction of full debug info's
+# size (full info made each worktree's target/ tens of GB).
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 # Temporary renderer override for the companion per-pixel text fade PR.
 # Replace with an upstream revision once it merges.

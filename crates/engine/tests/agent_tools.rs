@@ -942,9 +942,13 @@ async fn hand_off_orchestrator_starts_successor_with_workers_and_actions() {
         "request":"Review the result", "idempotencyKey":"review-result"
     })).await.unwrap();
     let lease = tokens.mint(CHAT, "run-1", SPACE, &rig.core.device_id);
-    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one"});
+    let args = json!({"summary":"Continue the release", "idempotencyKey":"handoff-one", "harness":"mock", "model":"mock-1", "reasoning":"medium"});
     let reply = tool(&rig, lease.token(), "hand_off_orchestrator", args.clone()).await.unwrap();
     let successor = reply["chatId"].as_str().unwrap();
+    let config = rig.core.workspace.chat(successor).unwrap().unwrap().config.unwrap();
+    assert_eq!(config.harness, HarnessId::Mock);
+    assert_eq!(config.model.as_deref(), Some("mock-1"));
+    assert_eq!(config.reasoning, Some(ReasoningLevel::Medium));
     let retry = tool(&rig, lease.token(), "hand_off_orchestrator", args).await.unwrap();
     assert_eq!(retry["chatId"], successor);
     assert!(tool(&rig, lease.token(), "hand_off_orchestrator", json!({
@@ -1362,6 +1366,56 @@ async fn read_subtree_caps_its_output_and_says_so() {
     assert_eq!(read["itemCount"], 300);
     assert_eq!(read["tree"]["children"].as_array().unwrap().len(), 299);
     assert_eq!(read["tree"]["childrenOmitted"], 11);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_subtree_omits_completed_branches_and_preserves_requests() {
+    let rig = rig().await;
+    let root = create_item(&rig, "compact-root", "Coordinator", None).await;
+    for i in 0..170 {
+        let item = create_item(&rig, &format!("compact-create-{i}"), &format!("Completed work item {i} with a descriptive title"), Some(&root)).await;
+        update_item(&rig, &format!("compact-complete-{i}"), &item, json!({"status": "completed"})).await.unwrap();
+    }
+    let parent = create_item(&rig, "compact-parent", "Completed parent", Some(&root)).await;
+    let leaf = create_item(&rig, "compact-leaf", "Request", Some(&parent)).await;
+    update_item(&rig, "compact-parent-done", &parent, json!({"status": "completed"})).await.unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op": "createUserActionRequest", "workItemId": leaf, "origin": {"chatId": OTHER_CHAT}, "text": "Review", "operationId": "compact-request"})).await.unwrap();
+    assign_chat(&rig, "compact-assign", CHAT, &root).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "compact-run", SPACE, &rig.core.device_id);
+    let compact = tool(&rig, lease.token(), "work_outline_read_subtree", json!({})).await.unwrap();
+    let full = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"includeCompleted": true})).await.unwrap();
+    assert_eq!(compact["itemCount"], 3);
+    assert_eq!(compact["tree"]["completedOmitted"], 170);
+    assert_eq!(compact["tree"]["children"][0]["children"][0]["openUserActionRequests"][0]["text"], "Review");
+    assert_eq!(full["itemCount"], 173);
+    assert_eq!(full["tree"]["completedOmitted"], 0);
+    let shallow = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"maxDepth": 0})).await.unwrap();
+    assert_eq!(shallow["tree"]["completedOmitted"], 170);
+    assert_eq!(shallow["tree"]["childrenOmitted"], 1);
+    let selected = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"workItemId": parent})).await.unwrap();
+    assert_eq!(selected["tree"]["id"], parent);
+    let before = serde_json::to_vec(&full).unwrap().len();
+    let after = serde_json::to_vec(&compact).unwrap().len();
+    // Baseline for this 173-item fixture: 46,499 bytes before, 1,220 after.
+    println!("subtree fixture: {before} bytes before, {after} bytes after");
+    assert!(after * 4 < before, "before={before}, after={after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_subtree_preserves_completed_items_with_working_chats() {
+    let rig = rig().await;
+    let root = create_item(&rig, "working-root", "Coordinator", None).await;
+    let completed = create_item(&rig, "working-item", "Completed", Some(&root)).await;
+    update_item(&rig, "working-complete", &completed, json!({"status": "completed"})).await.unwrap();
+    assign_chat(&rig, "working-caller", CHAT, &root).await;
+    assign_chat(&rig, "working-worker", OTHER_CHAT, &completed).await;
+    rig.core.doc_host.queue_command(OTHER_CHAT, run_command("work", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.sessions.session_status(OTHER_CHAT).is_some_and(|s| s.status == mast_proto::SessionStatus::Working), "worker running").await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "working-run", SPACE, &rig.core.device_id);
+    let read = tool(&rig, lease.token(), "work_outline_read_subtree", json!({})).await.unwrap();
+    assert_eq!(read["tree"]["children"][0]["id"], completed);
+    assert_eq!(read["tree"]["children"][0]["chats"][0]["status"], "working");
+    rig.harness.release.notify_one();
 }
 
 // ---- bind_chat_worktree -----------------------------------------------------
@@ -2003,6 +2057,17 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(repeated["userActionRequestId"], request_id.as_str());
+    let updated = call(
+        "work_outline_create_user_action_request",
+        json!({ "request": "Which release branch?", "detail": "Choose one", "dedupeKey": "branch", "facts": [{"label":"Version", "value":"2"}], "links": [{"label":"Reference", "target":{"type":"url", "url":"https://example.com/release"}}] }),
+    ).await.unwrap();
+    assert_eq!(updated["userActionRequestId"], request_id.as_str());
+    let updated_snapshot = snapshot(&rig);
+    let updated_request = updated_snapshot.user_action_requests.iter().find(|r| r.id == request_id).unwrap();
+    assert_eq!(updated_request.text, "Which release branch?");
+    assert_eq!(updated_request.info.as_deref(), Some("Choose one"));
+    assert_eq!(updated_request.facts[0].value, "2");
+    assert_eq!(updated_request.links[0].label, "Reference");
     assert_eq!(
         snapshot(&rig)
             .user_action_requests
@@ -2011,6 +2076,21 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
             .count(),
         1
     );
+    let explicit = |text: &str, key: &str| json!({"request":text, "dedupeKey":"explicit-update", "idempotencyKey":key});
+    let created_explicit = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    let repeated_explicit = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    assert_eq!(created_explicit["userActionRequestId"], repeated_explicit["userActionRequestId"]);
+    let changed_explicit = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    let repeated_change = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    assert_eq!(created_explicit["userActionRequestId"], changed_explicit["userActionRequestId"]);
+    assert_eq!(changed_explicit["userActionRequestId"], repeated_change["userActionRequestId"]);
+    assert!(call("work_outline_create_user_action_request", explicit("Different content", "explicit-update")).await.is_err());
+    call("work_outline_resolve_user_action_request", json!({"requestId":created_explicit["userActionRequestId"]})).await.unwrap();
+    let retry_create = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    let retry_update = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    assert_eq!(retry_create["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert_eq!(retry_update["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert!(request_is_resolved(&snapshot(&rig), created_explicit["userActionRequestId"].as_str().unwrap()));
     // `question` works as well, with an explicit key.
     let other = call(
         "work_outline_create_user_action_request",

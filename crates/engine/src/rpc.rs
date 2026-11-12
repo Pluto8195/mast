@@ -123,6 +123,48 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
+async fn hand_off_config(
+    registry: &HarnessRegistry,
+    data_dir: &std::path::Path,
+    source: Option<mast_proto::ChatConfig>,
+    fallback: HarnessId,
+    harness: Option<HarnessId>,
+    model: Option<String>,
+    reasoning: Option<mast_proto::ReasoningLevel>,
+) -> Result<Option<mast_proto::ChatConfig>, RpcError> {
+    if harness.is_none() && model.is_none() && reasoning.is_none() { return Ok(source); }
+    let mut config = source.unwrap_or(mast_proto::ChatConfig {
+        harness: fallback, model: None, reasoning: None, model_options: Default::default(),
+        sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
+    });
+    let target = harness.unwrap_or(config.harness);
+    let descriptor = registry.descriptors().into_iter().find(|d| d.id == target)
+        .ok_or_else(|| RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")))?;
+    if !descriptor.installed || !crate::registry::descriptor_enabled(&descriptor) && target != HarnessId::Mock {
+        return Err(RpcError::Failed(format!("harness {target:?} is not available (see list_harnesses)")));
+    }
+    let resolved = registry.resolve(target).map_err(|e| RpcError::Failed(e.to_string()))?;
+    let models = crate::model_catalogs::list(data_dir, resolved, false).await.unwrap_or_default();
+    if let Some(ref requested) = model {
+        if !models.is_empty() && !models.iter().any(|m| m.id == *requested) {
+            return Err(RpcError::Failed(format!("model {requested:?} is not offered by {target:?} (see list_models)")));
+        }
+    }
+    if target != config.harness {
+        config.harness = target;
+        let default = models.iter().find(|m| target.default_model() == Some(m.id.as_str())).or_else(|| models.first());
+        config.model = default.map(|m| m.id.clone()).or_else(|| target.default_model().map(str::to_owned));
+        config.reasoning = default.and_then(|m| {
+            let levels = &m.reasoning_levels;
+            [mast_proto::ReasoningLevel::High, mast_proto::ReasoningLevel::Medium].into_iter().find(|l| levels.contains(l)).or_else(|| levels.first().copied())
+        });
+        config.model_options.clear();
+    }
+    if let Some(model) = model { config.model = Some(model); }
+    if let Some(reasoning) = reasoning { config.reasoning = Some(reasoning); }
+    Ok(Some(config))
+}
+
 async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
@@ -2849,7 +2891,10 @@ impl RpcService for EngineRpc {
                     Some(id) => self.doc_host.queue_message_with_id(&p.chat_id, &id, &p.text, p.attachments, p.hold_for_turn_end).await,
                     None => self.doc_host.queue_message_with_behavior(&p.chat_id, &p.text, p.attachments, p.hold_for_turn_end),
                 }
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(|e| {
+                        tracing::warn!(chat = %p.chat_id, error = %e, "queue message failed");
+                        RpcError::Failed(e.to_string())
+                    })?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::UPDATE_QUEUED_MESSAGE => {
@@ -3331,6 +3376,26 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::ARTIFACT_ANSWER_QUESTIONS => {
+                let p: mast_proto::artifacts::ArtifactAnswerQuestionsParams = parse_params(params)?;
+                let by = self.work_outline.local_user();
+                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                self.artifact_reply(move |service| {
+                    let reply = service.answer_questions(&p, by)?;
+                    sync.reconcile(&p.artifact_id);
+                    Ok(reply)
+                }).await
+            }
+            methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => {
+                let p: mast_proto::decision_sheet::SubmitSheetDecisionsParams =
+                    parse_params(params)?;
+                let sync = crate::artifact_questions::ArtifactQuestionSync::new(self.artifacts.clone());
+                self.artifact_reply(move |service| {
+                    let reply = service.submit_sheet_decisions(&p)?;
+                    sync.reconcile(&p.artifact_id);
+                    Ok(reply)
+                }).await
+            }
             methods::ARTIFACT_ADD_COMMENT => {
                 let p: mast_proto::ArtifactAddCommentParams = parse_params(params)?;
                 let by = self.work_outline.local_user();
@@ -3496,11 +3561,13 @@ impl RpcService for EngineRpc {
                         }
                     } else if p.tool == mast_proto::agent_tools::tools::HAND_OFF_ORCHESTRATOR {
                         match tokio::task::spawn_blocking(move || service.prepare_orchestrator_successor(&p)).await {
-                            Ok(Ok((launch, source))) => self.launch
-                                .create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
+                            Ok(Ok((mut launch, source, harness, model, reasoning))) => {
+                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning).await?;
+                                self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source)
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
-                                .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string()))),
+                                .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string())))
+                            },
                             Ok(Err(e)) => Err(RpcError::Failed(e.to_wire_message())),
                             Err(e) => Err(RpcError::Failed(e.to_string())),
                         }
@@ -3541,10 +3608,11 @@ impl RpcService for EngineRpc {
                     .ok_or_else(|| RpcError::Failed("Chat has no Space".into()))?;
                 let item = self.workspace.chat_assigned_work_item(&p.chat_id, space_id)
                     .ok_or_else(|| RpcError::Failed("Chat has no work item".into()))?;
+                let config = hand_off_config(&self.registry, self.repos.data_dir(), source.config, self.doc_host.harness_for(&p.chat_id), p.harness, p.model, p.reasoning).await?;
                 let launch = mast_proto::CreateChatForWorkItemParams {
                     work_item_id: item,
                     initial_prompt: mast_proto::WorkItemPrompt { text: p.summary, attachments: Vec::new() },
-                    config: source.config,
+                    config,
                     execution_override: None,
                     worktree_choice: None,
                     operation_id: p.operation_id,
@@ -5557,6 +5625,26 @@ impl RpcService for EngineRpc {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn hand_off_config_preserves_and_validates_selection() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(mast_harness::mock::MockHarness { script: vec![] }));
+        let mut options = serde_json::Map::new();
+        options.insert("old".into(), serde_json::json!(true));
+        let source = mast_proto::ChatConfig { harness: HarnessId::Codex, model: Some("old-model".into()), reasoning: Some(mast_proto::ReasoningLevel::High), model_options: options, sandbox: mast_proto::SandboxLevel::ReadOnly, auto_approve: true };
+        let unchanged = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, None, None, None).await.unwrap();
+        assert_eq!(unchanged, Some(source.clone()));
+        let changed = hand_off_config(&registry, dir.path(), Some(source.clone()), HarnessId::Codex, Some(HarnessId::Mock), Some("mock-1".into()), Some(mast_proto::ReasoningLevel::Medium)).await.unwrap().unwrap();
+        assert_eq!(changed.harness, HarnessId::Mock);
+        assert_eq!(changed.model.as_deref(), Some("mock-1"));
+        assert_eq!(changed.reasoning, Some(mast_proto::ReasoningLevel::Medium));
+        assert!(changed.model_options.is_empty());
+        assert_eq!(changed.sandbox, source.sandbox);
+        assert!(changed.auto_approve);
+        assert!(hand_off_config(&registry, dir.path(), Some(source), HarnessId::Codex, Some(HarnessId::Mock), Some("unknown".into()), None).await.is_err());
+    }
     use super::*;
 
     /// Wire-contract pin: `SET_CHAT_LINK`'s request shape

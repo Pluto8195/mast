@@ -377,6 +377,14 @@ pub struct CreateUserActionRequestParams {
     pub operation_id: String,
 }
 
+/// Replace the editable content of an open request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateUserActionRequestParams {
+    pub user_action_request_id: String,
+    pub request: CreateUserActionRequestParams,
+}
+
 /// `resolveUserActionRequest`: records an explicit resolution (also on every
 /// open duplicate of the request). Resolving a resolved request is a no-op.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

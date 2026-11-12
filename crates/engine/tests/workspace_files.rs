@@ -166,7 +166,7 @@ async fn search_index_tracks_file_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_index_repairs_when_watcher_exceeds_budget() {
+async fn search_index_refreshes_on_subscription_when_watcher_exceeds_budget() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo(&repo).await;
@@ -200,6 +200,49 @@ async fn search_index_repairs_when_watcher_exceeds_budget() {
         .unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     std::fs::write(repo.join("created.rs"), "created").unwrap();
+    // Reopening the picker requests a refresh even without filesystem events.
+    let mut reopened = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_SEARCH_FILES,
+            serde_json::json!({"chatId":"chat-index"}),
+        )
+        .await
+        .unwrap();
+    let cached = reopened.recv().await.unwrap();
+    assert!(
+        !cached["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "created.rs")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), reopened.recv())
+            .await
+            .is_err(),
+        "an open during the cooldown must not immediately re-walk"
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let frame = reopened.recv().await.unwrap();
+            if frame["files"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "created.rs"))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::write(repo.join("not-requested.rs"), "later").unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), reopened.recv())
+            .await
+            .is_err(),
+        "a refresh request must not start a recurring re-walk timer"
+    );
+    // The existing picker shares the refreshed index too.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let frame = stream.recv().await.unwrap();

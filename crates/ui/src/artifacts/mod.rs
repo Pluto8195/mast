@@ -23,6 +23,7 @@ pub(crate) mod cards;
 pub(crate) mod comments;
 pub(crate) mod compare;
 pub(crate) mod document;
+pub(crate) mod decision_sheet_html;
 pub(crate) mod find;
 pub(crate) mod layout_heuristics;
 pub(crate) mod links;

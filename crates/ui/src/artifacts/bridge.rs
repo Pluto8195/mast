@@ -63,6 +63,11 @@ pub(crate) enum FrameMessage {
     FocusComment(String),
     /// The reader answered a plan question card in place.
     Answer { id: String, text: String },
+    SheetStage { id: String, outcome: mast_proto::decision_sheet::DecisionOutcome, note: String, override_recommendation: bool },
+    QuestionUndo(String),
+    SheetUndo(String),
+    SheetDiscard,
+    SheetSend,
 }
 
 impl FrameMessage {
@@ -92,6 +97,26 @@ impl FrameMessage {
                 let id = mast_proto::artifacts::normalize_comment_id(&text("id", 16)?)?;
                 Some(FrameMessage::FocusComment(id))
             }
+            "sheet-stage" => {
+                use mast_proto::decision_sheet::DecisionOutcome;
+                let id = text("id", 256)?;
+                if id.is_empty() { return None; }
+                let outcome = match object.get("outcome")?.as_str()? {
+                    "decided" => DecisionOutcome::Decided,
+                    "rejected" => DecisionOutcome::Rejected,
+                    _ => return None,
+                };
+                let note = text("note", 600).unwrap_or_default();
+                Some(FrameMessage::SheetStage { id, outcome, note, override_recommendation: object.get("overrideRecommendation").and_then(Value::as_bool).unwrap_or(false) })
+            }
+            "question-undo" => {
+                let id = text("id", 16)?.trim().to_ascii_uppercase();
+                id.strip_prefix("Q-").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))?;
+                Some(FrameMessage::QuestionUndo(id))
+            }
+            "sheet-undo" => Some(FrameMessage::SheetUndo(text("id", 256)?)),
+            "sheet-discard" => Some(FrameMessage::SheetDiscard),
+            "sheet-send" => Some(FrameMessage::SheetSend),
             "answer" => {
                 let id = text("id", 16)?.trim().to_ascii_uppercase();
                 let valid = id

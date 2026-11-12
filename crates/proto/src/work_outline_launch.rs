@@ -111,6 +111,12 @@ pub struct HandOffOrchestratorParams {
     pub chat_id: String,
     pub summary: String,
     pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::HarnessId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<crate::ReasoningLevel>,
 }
 
 /// Params of `ContinueChatForWorkItem`.

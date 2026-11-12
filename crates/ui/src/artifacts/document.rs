@@ -47,7 +47,7 @@ pub(crate) fn web_document(
     let frame_scripts = if probe {
         format!(
             "{LINK_FRAME_SCRIPT}{FIND_FRAME_SCRIPT}{QUESTION_FRAME_SCRIPT}{}",
-            probe_script()
+            probe_script(theme)
         )
     } else {
         // Only the app's own view gets the comment + answer bridge; render
@@ -58,12 +58,12 @@ pub(crate) fn web_document(
     };
     let probe_script = Some(frame_scripts);
     let document = match kind {
-        WebKind::Fragment | WebKind::DecisionSheet => {
+        WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan => {
             let body = with_probe_prefix(&with_question_style(source), probe_script.as_deref());
             fragment::host_document(
                 &body,
                 title,
-                kind == WebKind::DecisionSheet,
+                matches!(kind, WebKind::DecisionSheet | WebKind::Plan),
                 theme,
                 reduced_motion,
             )
@@ -94,6 +94,48 @@ pub(crate) fn web_document(
         with_collector(&document)
     } else {
         document
+    }
+}
+
+/// A standalone document without the host frame or Mast messaging bridges.
+/// `source` is already rendered for structured artifact kinds.
+pub(crate) fn export_document(kind: WebKind, source: &str, title: &str, pdf: bool) -> String {
+    let light = FragmentTheme::from_theme(&crate::theme::Theme::light());
+    let dark = FragmentTheme::from_theme(&crate::theme::Theme::dark());
+    let mut style = fragment::base_stylesheet(&light, false);
+    if !pdf {
+        let mut dark_vars = String::from("color-scheme: dark;\n");
+        for (name, value) in &dark.vars {
+            dark_vars.push_str(&format!("{name}: {value};\n"));
+        }
+        style.push_str(&format!("\n@media (prefers-color-scheme: dark) {{ :root:not([data-theme]) {{ {dark_vars} }} }}\n:root[data-theme=dark] {{ {dark_vars} }}\n"));
+    }
+    style.push_str("html, body { background: var(--background); } body { padding: 24px !important; } .mk-sheet-actions { display: none !important; }\n");
+    if kind == WebKind::DecisionSheet {
+        style.push_str(".mk-grid, .mk-screenshots { grid-template-columns: minmax(0, 1fr); } .mk-table { table-layout: fixed; } .mk-table th, .mk-table td { white-space: normal; min-width: 0; overflow-wrap: anywhere; } .mk-table th:first-child, .mk-table td:first-child { width: 72px; } .mk-row-id, .mk-mono, .mk-step-chip, .mk-step-params { white-space: normal; overflow-wrap: anywhere; word-break: normal; } .mk-screenshot-placeholder { min-height: 0; padding: 10px; }\n");
+    }
+    if pdf {
+        style.push_str("@page { size: A4; margin: 15mm; } @media print { body { padding: 0 !important; } .pl-rail { display: none !important; } }\n");
+    }
+    let theme_script = if pdf {
+        "document.documentElement.dataset.theme='light'; document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('details').forEach(d => d.open = true));"
+    } else {
+        "const m=matchMedia('(prefers-color-scheme: dark)'); const theme=()=>document.documentElement.dataset.theme=m.matches?'dark':'light'; theme(); m.addEventListener('change',theme);"
+    };
+    let extras = format!("<style>{style}{QUESTION_CSS}</style><script>{theme_script}</script>");
+    let runtime = format!("<script>{}</script>", fragment::RUNTIME_SCRIPT);
+    if kind == WebKind::Page {
+        let page = inject_head_markup(source, &extras);
+        if let Some(pos) = page.to_ascii_lowercase().rfind("</body>") {
+            format!("{}{runtime}{}", &page[..pos], &page[pos..])
+        } else {
+            format!("{page}{runtime}")
+        }
+    } else {
+        let body = if kind == WebKind::Mermaid {
+            mermaid_fragment(source, false)
+        } else { source.to_owned() };
+        format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title>{extras}</head><body>{body}{runtime}</body></html>", escape_text(title))
     }
 }
 
@@ -189,14 +231,14 @@ pub(crate) fn compare_frame(
     let scripts = format!("{LINK_FRAME_SCRIPT}{QUESTION_FRAME_SCRIPT}{script}");
     let body = |fragment: &str| format!("<script>{scripts}</script>\n{fragment}\n{overlay}");
     let (html, wide) = match kind {
-        WebKind::Fragment | WebKind::DecisionSheet => (
+        WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan => (
             fragment::frame_document(
                 &body(&with_question_style(source)),
                 title,
                 theme,
                 reduced_motion,
             ),
-            kind == WebKind::DecisionSheet,
+            matches!(kind, WebKind::DecisionSheet | WebKind::Plan),
         ),
         WebKind::Mermaid => (
             fragment::frame_document(
@@ -257,6 +299,14 @@ pub(crate) fn compare_frame(
 pub(crate) const LINK_FRAME_SCRIPT: &str = r##"(() => {
   if (window.__mastLinksInstalled) return;
   window.__mastLinksInstalled = true;
+  const reportEditFocus = () => {
+    const el = document.activeElement;
+    const editable = !!el && (el.isContentEditable || el.tagName === "TEXTAREA" ||
+      (el.tagName === "INPUT" && !/^(button|checkbox|radio|submit|reset|range|color|file|image)$/i.test(el.type)));
+    try { parent.postMessage({ mastEditFocus: editable }, "*"); } catch (_) {}
+  };
+  document.addEventListener("focusin", reportEditFocus, true);
+  document.addEventListener("focusout", () => setTimeout(reportEditFocus, 0), true);
   const handle = (event) => {
     const node = event.target;
     const a = node && node.closest ? node.closest("a, area") : null;
@@ -280,6 +330,10 @@ pub(crate) const LINK_FRAME_SCRIPT: &str = r##"(() => {
 pub(crate) const LINK_HOST_SCRIPT: &str = r##"window.addEventListener("message", (event) => {
   const frame = document.querySelector("iframe");
   if (!frame || event.source !== frame.contentWindow) return;
+  if (event.data && typeof event.data.mastEditFocus === "boolean") {
+    window.__mastEditFocus = event.data.mastEditFocus;
+    return;
+  }
   const href = event.data && event.data.mastLink;
   if (typeof href !== "string" || href.length > 4096) return;
   const a = document.createElement("a");
@@ -435,8 +489,22 @@ pub(crate) const READ_PROBE_SCRIPT: &str =
 /// the layout heuristics ([`super::layout_heuristics`]). Posts
 /// `{mastRenderProbe: {errors, warnings, metrics}}` to the parent once the
 /// page has loaded and settled.
-pub(crate) fn probe_script() -> String {
+pub(crate) fn probe_script(theme: &FragmentTheme) -> String {
+    let background = theme
+        .vars
+        .iter()
+        .find(|(name, _)| *name == "--background")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(if theme.dark {
+            "rgb(0 0 0)"
+        } else {
+            "rgb(255 255 255)"
+        });
     PROBE_TEMPLATE
+        .replace(
+            "__THEME_BACKGROUND__",
+            &serde_json::to_string(background).expect("theme background"),
+        )
         .replace("__SETTLE_MS__", &SETTLE_MS.to_string())
         .replace("__MERMAID_WAIT_MS__", &MERMAID_WAIT_MS.to_string())
 }
@@ -492,10 +560,40 @@ const PROBE_TEMPLATE: &str = r##"(() => {
       const c = rgb(getComputedStyle(node).backgroundColor);
       if (c && c.a > 0.5) return c;
     }
-    return rgb(getComputedStyle(document.documentElement).backgroundColor) ||
-      (matchMedia("(prefers-color-scheme: dark)").matches ? { r: 0, g: 0, b: 0, a: 1 } : { r: 255, g: 255, b: 255, a: 1 });
+    return rgb(__THEME_BACKGROUND__) || { r: 255, g: 255, b: 255, a: 1 };
+  };
+  // Keep both the serialized report and the native sibling comparisons bounded.
+  const maxMetrics = 1000;
+  const pixelWidth = (style) => {
+    const values = [style.width, style.minWidth].map((value) => {
+      const match = String(value || "").trim().match(/^(\d+(?:\.\d+)?)px$/i);
+      return match ? Math.round(Number(match[1])) : 0;
+    });
+    return Math.max(...values);
+  };
+  const widthRules = () => {
+    const found = [];
+    const visit = (rules) => {
+      for (const rule of rules) {
+        if (rule.selectorText && rule.style) {
+          const width = pixelWidth(rule.style);
+          if (width) found.push([rule.selectorText, width]);
+        } else if (rule.cssRules && (!rule.conditionText ||
+          (rule.media && matchMedia(rule.conditionText).matches) ||
+          (!rule.media && window.CSS && CSS.supports(rule.conditionText)))) {
+          visit(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) {
+      try { if (!sheet.disabled && (!sheet.media || !sheet.media.mediaText || matchMedia(sheet.media.mediaText).matches)) visit(sheet.cssRules); } catch (_) {}
+    }
+    return found;
   };
   const report = () => {
+    const metrics = [];
+    let contentHeight = 0;
+    try {
     document.querySelectorAll("pre.mermaid, div.mermaid").forEach((el) => {
       const failed = el.getAttribute("data-mast-error");
       if (failed) push(errors, "Mermaid: " + failed);
@@ -515,17 +613,51 @@ const PROBE_TEMPLATE: &str = r##"(() => {
     let outside = 0, lowContrast = 0;
     const examples = [], contrastExamples = [];
     const all = body ? body.querySelectorAll("*") : [];
+    const indexes = new Map();
+    const rules = widthRules();
     for (let i = 0; i < all.length && i < 4000; i++) {
       const el = all[i];
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
+      const style = getComputedStyle(el);
+      if (style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) continue;
+      if (metrics.length < maxMetrics) {
+        const parentEl = el.parentElement;
+        const parentStyle = parentEl ? getComputedStyle(parentEl) : null;
+        const ownText = (el.innerText || "").replace(/\s+/g, " ").trim();
+        const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
+        const leaf = own && Array.from(el.children).every((child) => getComputedStyle(child).display.startsWith("inline"));
+        const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 16) * 1.2;
+        let fixed = pixelWidth(el.style);
+        for (const [selector, width] of rules) {
+          try { if (el.matches(selector)) fixed = Math.max(fixed, width); } catch (_) {}
+        }
+        const cell = el.closest("td, th");
+        const table = cell && cell.closest("table");
+        const tableFits = !!(table && table.parentElement && table.scrollWidth <= table.parentElement.clientWidth + 1);
+        const index = metrics.length;
+        indexes.set(el, index);
+        metrics.push({
+          sel: (describe(el) + (el.id ? "" : ":nth-child(" + (Array.prototype.indexOf.call(parentEl ? parentEl.children : [], el) + 1) + ")")).slice(0, 200),
+          text: ownText.slice(0, 200),
+          x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY),
+          w: Math.round(r.width), h: Math.round(r.height),
+          sw: el.scrollWidth, sh: el.scrollHeight, cw: el.clientWidth, ch: el.clientHeight,
+          clips: /^(hidden|clip)$/.test(style.overflowX) || /^(hidden|clip)$/.test(style.overflowY) || style.textOverflow === "ellipsis",
+          pos: style.position,
+          parent: parentEl === body ? -1 : (indexes.has(parentEl) ? indexes.get(parentEl) : -2),
+          pcw: parentEl ? parentEl.clientWidth : 0,
+          pscroll: !!parentStyle && /^(auto|scroll|overlay)$/.test(parentStyle.overflowX),
+          tableFits, leaf, lines: leaf ? Math.max(1, Math.round(r.height / lineHeight)) : 0,
+          words: leaf && ownText ? ownText.split(/\s+/).length : 0, fixed
+        });
+      }
       if (r.right > window.innerWidth + 1 || r.left < -1) {
         outside++;
         if (examples.length < 3) examples.push(describe(el));
       }
       const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
       if (own && lowContrast < 50) {
-        const style = getComputedStyle(el);
         const fg = rgb(style.color);
         if (fg && fg.a > 0.5 && style.visibility !== "hidden" && Number(style.opacity) > 0.3) {
           const bg = background(el);
@@ -537,14 +669,24 @@ const PROBE_TEMPLATE: &str = r##"(() => {
     }
     if (outside) push(warnings, outside + " element(s) extend outside the viewport horizontally (" + examples.join(", ") + ")");
     if (lowContrast) push(warnings, lowContrast + " text element(s) have contrast below 3:1 (" + contrastExamples.join(", ") + ")");
-    const contentHeight = Math.ceil(Math.max(
+    contentHeight = Math.ceil(Math.max(
       document.documentElement ? document.documentElement.scrollHeight : 0,
       document.body ? document.body.scrollHeight : 0));
+    } catch (error) {
+      // Reserve space for this diagnostic even if the page filled the error list.
+      if (errors.length >= 40) errors.pop();
+      push(errors, "Render probe failed: " + (error && error.message ? error.message : String(error)));
+    }
     try { parent.postMessage({ mastRenderProbe: { errors, warnings, metrics, contentHeight } }, "*"); } catch (_) {}
   };
   const waitMermaid = (deadline) => {
-    const pending = Array.from(document.querySelectorAll("pre.mermaid, div.mermaid")).some((el) =>
-      !el.querySelector("svg") && !el.getAttribute("data-mast-error") && !el.getAttribute("data-processed"));
+    let pending = false;
+    try {
+      pending = Array.from(document.querySelectorAll("pre.mermaid, div.mermaid")).some((el) =>
+        !el.querySelector("svg") && !el.getAttribute("data-mast-error") && !el.getAttribute("data-processed"));
+    } catch (error) {
+      push(errors, "Render probe failed: " + (error && error.message ? error.message : String(error)));
+    }
     if (pending && Date.now() < deadline) { setTimeout(() => waitMermaid(deadline), 100); return; }
     report();
   };
@@ -566,4 +708,120 @@ pub(crate) struct ProbeReport {
     /// The frame document's full scroll height in CSS pixels.
     #[serde(default, rename = "contentHeight")]
     pub(crate) content_height: Option<u32>,
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::PROBE_TEMPLATE;
+
+    #[test]
+    fn probe_payload_names_are_declared() {
+        let payload = PROBE_TEMPLATE
+            .split("mastRenderProbe: {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("probe payload");
+        let declarations = PROBE_TEMPLATE.split("parent.postMessage").next().unwrap();
+        for name in payload.split(',').map(str::trim) {
+            assert!(
+                declarations.contains(&format!("const {name} "))
+                    || declarations.contains(&format!("let {name} "))
+                    || (name == "warnings"
+                        && declarations.contains("const errors = [], warnings = []")),
+                "payload name {name} must be declared before posting"
+            );
+        }
+        assert_eq!(payload.split(',').count(), 4);
+    }
+
+    #[test]
+    fn probe_reports_metrics_and_report_errors_in_node_when_available() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut node = match Command::new("node").stdin(Stdio::piped()).spawn() {
+            Ok(node) => node,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("start node: {error}"),
+        };
+        let harness = r#"
+const vm = require('vm');
+const script = PROBE;
+function run(fail) {
+  let result;
+  const style = { visibility:'visible', opacity:'1', display:'block', lineHeight:'20px', fontSize:'16px',
+    color:'rgb(0, 0, 0)', backgroundColor:'rgba(0, 0, 0, 0)', overflowX:'visible', overflowY:'visible', position:'static' };
+  const body = { innerText:'hi', scrollHeight:20, clientWidth:300, children:[], querySelectorAll: s => s === '*' ? [el] : [] };
+  const el = { tagName:'P', id:'', classList:[], style:{}, parentElement:body, children:[], childNodes:[{nodeType:3,textContent:'hi'}],
+    innerText:'hi', scrollWidth:100, scrollHeight:20, clientWidth:100, clientHeight:20,
+    getBoundingClientRect:() => { if (fail) throw Error('fixture failure'); return {left:0,top:0,right:100,width:100,height:20}; }, matches:() => false, closest:() => null };
+  body.children.push(el);
+  const root = {scrollWidth:300, clientWidth:300, scrollHeight:20};
+  const document = {readyState:'complete', body, documentElement:root, scrollingElement:root, styleSheets:[], addEventListener(){}, querySelectorAll:() => []};
+  const window = {innerWidth:300, scrollX:0, scrollY:0, addEventListener(){}};
+  const context = {window, document, parent:{postMessage: x => result = x.mastRenderProbe}, console,
+    getComputedStyle:() => style, matchMedia:() => ({matches:true}), setTimeout: f => f(), Date};
+  vm.runInNewContext(script, context);
+  return result;
+}
+const ok = run(false);
+if (!ok || ok.errors.length || ok.warnings.length || ok.metrics.length !== 1 || ok.metrics[0].text !== 'hi' || ok.metrics[0].parent !== -1) throw Error('normal report failed');
+const broken = run(true);
+if (!broken || !broken.errors.some(e => e.includes('Render probe failed: fixture failure'))) throw Error('failure report missing');
+"#;
+        let script = super::probe_script(&crate::browser::fragment::FragmentTheme {
+            dark: false,
+            vars: vec![("--background", "rgb(255 255 255)".into())],
+            font_sans: String::new(),
+            font_mono: String::new(),
+        });
+        let input = harness.replace("PROBE", &serde_json::to_string(&script).unwrap());
+        node.stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        assert!(node.wait().unwrap().success());
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_uses_cdn_and_pdf_expands_details() {
+        let html = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", false);
+        assert!(html.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
+        let pdf_mermaid = export_document(WebKind::Mermaid, "graph TD; A-->B", "Diagram", true);
+        assert!(pdf_mermaid.contains(&format!("<script src=\"{MERMAID_SRC}\"></script>")));
+        assert!(html.contains("graph TD; A--&gt;B"));
+        let pdf = export_document(WebKind::Fragment, "<details><summary>More</summary>Text</details>", "PDF", true);
+        assert!(pdf.contains("d.open = true"));
+        assert!(pdf.contains("@page"));
+    }
+
+    #[test]
+    fn standalone_documents_have_kit_without_mast_bridges() {
+        let plan = mast_proto::plan::Plan::parse(include_str!("../../../../docs/artifact-kit/plan-example.json")).unwrap();
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(include_str!("../../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
+        if std::env::var_os("MAST_WRITE_EXPORT_EXAMPLES").is_some() {
+            let dir = std::path::Path::new("/private/tmp/artifact-export");
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("plan.html"), export_document(WebKind::Plan, &mast_proto::plan_render::render(&plan), &plan.title, false)).unwrap();
+            std::fs::write(dir.join("decision-sheet.html"), export_document(WebKind::DecisionSheet, &mast_proto::decision_sheet_render::render(&sheet), &sheet.title, false)).unwrap();
+        }
+        for (kind, body) in [
+            (WebKind::Plan, mast_proto::plan_render::render(&plan)),
+            (WebKind::DecisionSheet, mast_proto::decision_sheet_render::render(&sheet)),
+            (WebKind::Fragment, "<p>Fragment</p>".to_owned()),
+        ] {
+            let html = export_document(kind, &body, "Example", false);
+            assert!(html.contains("--mk-blue"));
+            assert!(html.contains("prefers-color-scheme"));
+            assert!(!html.contains("mastMsg"));
+            assert!(!html.contains("mastRenderProbe"));
+            assert!(!html.contains("srcdoc="));
+        }
+    }
 }

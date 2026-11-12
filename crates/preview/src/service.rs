@@ -36,6 +36,10 @@ enum Verdict {
         backoff: Duration,
     },
 }
+/// Listener scans spawn `lsof` and `ps`. Rescan quickly while listeners are
+/// changing, and back off while the set stays the same.
+const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const SCAN_MAX_INTERVAL: Duration = Duration::from_secs(10);
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
 const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -154,6 +158,8 @@ impl PreviewService {
         let stop = self.0.stop.clone();
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
+            let mut last_candidates = None;
+            let mut pause = SCAN_INTERVAL;
             loop {
                 let memory = &mut memory;
                 let scan = async {
@@ -182,6 +188,11 @@ impl PreviewService {
                     })
                     .await
                     .unwrap_or_default();
+                    let mut signature: Vec<_> = candidates
+                        .iter()
+                        .map(|(_, listener)| probe_key(listener))
+                        .collect();
+                    signature.sort_unstable();
                     let (mut servers, probe) = memory.plan(candidates, Instant::now());
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
@@ -201,9 +212,13 @@ impl PreviewService {
                     if let Err(error) = catalog.replace_local(servers) {
                         tracing::warn!(%error, "could not update preview services");
                     }
+                    signature
                 };
-                tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
+                let signature =
+                    tokio::select! { _ = stop.cancelled() => break, signature = scan => signature };
+                pause = next_scan_pause(pause, last_candidates.as_ref() == Some(&signature));
+                last_candidates = Some(signature);
+                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(pause) => {} }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -228,6 +243,14 @@ impl PreviewService {
         for task in tasks {
             let _ = task.await;
         }
+    }
+}
+
+fn next_scan_pause(pause: Duration, unchanged: bool) -> Duration {
+    if unchanged {
+        (pause * 2).min(SCAN_MAX_INTERVAL)
+    } else {
+        SCAN_INTERVAL
     }
 }
 
@@ -277,6 +300,21 @@ impl Connector for LocalConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_scans_back_off_while_nothing_changes() {
+        let mut pause = SCAN_INTERVAL;
+        for expected in [4, 8, 10, 10] {
+            pause = next_scan_pause(pause, true);
+            assert_eq!(pause, Duration::from_secs(expected));
+        }
+        assert_eq!(
+            next_scan_pause(pause, false),
+            SCAN_INTERVAL,
+            "a change resets"
+        );
+    }
+
     fn listener(pid: u32, port: u16) -> discovery::Listener {
         discovery::Listener {
             pid,

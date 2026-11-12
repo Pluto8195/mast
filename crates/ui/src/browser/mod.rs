@@ -548,6 +548,21 @@ impl BrowserSurface {
 }
 
 #[cfg(target_os = "macos")]
+fn static_document_event(
+    fragment: bool,
+    document: bool,
+    presentation: Presentation,
+    event: &native::NativeEvent,
+) -> Option<BrowserEvent> {
+    if !(fragment || document) || presentation != Presentation::Live { return None; }
+    match event {
+        native::NativeEvent::Link(raw) => Some(BrowserEvent::DocumentLink(raw.clone())),
+        native::NativeEvent::Message(json) => Some(BrowserEvent::DocumentMessage(json.clone())),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl BrowserSurface {
     fn on_native_event(
         &mut self,
@@ -555,10 +570,16 @@ impl BrowserSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(event, native::NativeEvent::Link(_) | native::NativeEvent::Message(_)) {
+            if let Some(event) = static_document_event(self.fragment.is_some(), self.document.is_some(), self.presentation, &event) {
+                cx.emit(event);
+            }
+            return;
+        }
         let Some(native) = &mut self.native else {
             return;
         };
-        if self.fragment.is_some() {
+        if self.fragment.is_some() || self.document.is_some() {
             // A visualization has no address, history or favicon; only its
             // load state and failures matter. Link activations still open
             // ordinary Browser tabs.
@@ -578,16 +599,7 @@ impl BrowserSurface {
                         cx.emit(BrowserEvent::NewTab(Some(url)));
                     }
                 }
-                native::NativeEvent::Link(raw) => {
-                    if self.presentation == Presentation::Live {
-                        cx.emit(BrowserEvent::DocumentLink(raw));
-                    }
-                }
-                native::NativeEvent::Message(json) => {
-                    if self.presentation == Presentation::Live {
-                        cx.emit(BrowserEvent::DocumentMessage(json));
-                    }
-                }
+                native::NativeEvent::Link(_) | native::NativeEvent::Message(_) => unreachable!(),
                 native::NativeEvent::Key(key) => {
                     if self.presentation == Presentation::Live {
                         window.focus(&self.focus, cx);
@@ -797,6 +809,18 @@ impl BrowserSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn static_artifact_messages_reach_the_tab_only_when_live() {
+        let json = r#"{"t":"sheet-stage","id":"ui-4","outcome":"decided","note":""}"#;
+        let event = native::NativeEvent::Message(json.into());
+        assert!(matches!(static_document_event(false, true, Presentation::Live, &event), Some(BrowserEvent::DocumentMessage(ref message)) if message == json));
+        assert!(static_document_event(false, true, Presentation::Hidden, &event).is_none());
+        assert!(static_document_event(false, false, Presentation::Live, &event).is_none());
+        let link = native::NativeEvent::Link("docs/file.md".into());
+        assert!(matches!(static_document_event(false, true, Presentation::Live, &link), Some(BrowserEvent::DocumentLink(ref url)) if url == "docs/file.md"));
+    }
+
     #[gpui::test]
     fn address_enter_rejects_unsupported_schemes_and_escape_restores_url(
         cx: &mut gpui::TestAppContext,

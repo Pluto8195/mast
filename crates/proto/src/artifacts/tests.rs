@@ -35,6 +35,7 @@ fn view() -> ArtifactView {
         }],
         pinned_as_plan: true,
         answers: Vec::new(),
+        decisions: Vec::new(),
         comments: Vec::new(),
         picked: None,
         promoted_path: Some("/repo/docs/plans/flow.fragment.html".into()),

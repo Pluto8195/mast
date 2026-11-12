@@ -84,6 +84,29 @@ pub struct ArtifactAnswerQuestionReply {
     pub question_id: String,
 }
 
+/// One plan question staged for a batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanQuestionDraft {
+    pub question_id: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactAnswerQuestionsParams {
+    pub artifact_id: String,
+    pub revision: u32,
+    pub answers: Vec<PlanQuestionDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactAnswerQuestionsReply {
+    pub artifact_id: String,
+    pub answers: Vec<ArtifactQuestionAnswer>,
+}
+
 /// `ArtifactDrift`: how far the work has moved since the artifact's latest
 /// revision, from the owning device's checkouts. Forwardable (owning device).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

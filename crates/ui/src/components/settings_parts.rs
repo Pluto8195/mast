@@ -535,6 +535,11 @@ pub(crate) fn settings_appearance_preview(
 
 /// Illustration of a style choice inside the appearance picker.
 pub(crate) fn settings_style_preview(theme: &Theme, id: crate::ui_style::UiStyleId) -> AnyElement {
+    let variants = id.recommended_themes();
+    let variant = if theme.appearance.is_dark() { variants.1 } else { variants.0 };
+    let mut preview = Theme::for_selection(theme.appearance, variant, Default::default(), theme.surface_preference);
+    preview.ui_style = crate::ui_style::UiStyle::resolve(id, crate::ui_style::UiLayout::Minimal);
+    let theme = &preview;
     div()
         .size_full()
         .rounded(px(theme
@@ -547,12 +552,12 @@ pub(crate) fn settings_style_preview(theme: &Theme, id: crate::ui_style::UiStyle
         .flex()
         .flex_col()
         .gap(px(id.preview_gap()))
-        .children((0..4).map(|_| {
+        .children((0..4).map(|index| {
             div()
                 .h(px(12.0))
                 .w_full()
                 .rounded(px(theme.ui_style.radius_roles().control.unwrap_or(3.0)))
-                .bg(theme.surface_raised)
+                .bg(if index == 0 { theme.accent } else { theme.surface_raised })
         }))
         .child(
             div()

@@ -130,6 +130,10 @@ pub(crate) fn request_document(
         document::web_document(kind, source, &title, mime, theme, false, true)
     };
     match kind {
+        ArtifactKind::Plan => {
+            let plan = mast_proto::plan::Plan::parse(&text()?).map_err(RenderSkip::Invalid)?;
+            Ok(web(WebKind::Plan, &mast_proto::plan_render::render(&plan), "text/html"))
+        }
         ArtifactKind::DecisionSheet => {
             let sheet = mast_proto::decision_sheet::DecisionSheet::parse(&text()?)
                 .map_err(RenderSkip::Invalid)?;
@@ -645,6 +649,56 @@ pub(crate) mod webkit {
             view.evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&block));
         }
         rx.await.ok().flatten()
+    }
+
+    /// Print an offscreen standalone document as a paginated A4 PDF.
+    /// The native print operation is exercised manually because WebKit is not
+    /// available in the headless GPUI test platform.
+    pub(crate) async fn export_pdf(
+        document: String,
+        path: std::path::PathBuf,
+        executor: gpui::BackgroundExecutor,
+    ) -> Result<(), String> {
+        let mtm = MainThreadMarker::new().ok_or("PDF export must run on the main thread")?;
+        let offscreen = open(mtm, &document, ArtifactViewport { width: 794, height: 1123 });
+        unsafe {
+            let appearance: Option<Retained<AnyObject>> = msg_send![class!(NSAppearance), appearanceNamed: objc2_app_kit::NSAppearanceNameAqua];
+            let _: () = msg_send![&*offscreen.view, setAppearance: appearance.as_deref()];
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut ready = false;
+        while Instant::now() < deadline {
+            executor.timer(Duration::from_millis(100)).await;
+            let loading: bool = unsafe { msg_send![&*offscreen.view, isLoading] };
+            if loading { continue; }
+            let state = evaluate(&offscreen.view, "document.readyState === 'complete' && (!document.fonts || document.fonts.status === 'loaded') && !document.querySelector('pre.mermaid:not([data-processed])') ? 'ready' : 'waiting'").await;
+            if state.as_deref() == Some("ready") { ready = true; break; }
+        }
+        if !ready { return Err("The document did not finish loading for PDF export".into()); }
+        // Let WebKit finish layout after the last font or Mermaid render.
+        executor.timer(Duration::from_millis(300)).await;
+        let path_string = NSString::from_str(&path.to_string_lossy());
+        unsafe {
+            let info: Retained<AnyObject> = msg_send![class!(NSPrintInfo), new];
+            let _: () = msg_send![&*info, setPaperSize: NSSize::new(595.0, 842.0)];
+            let _: () = msg_send![&*info, setTopMargin: 42.0f64];
+            let _: () = msg_send![&*info, setBottomMargin: 42.0f64];
+            let _: () = msg_send![&*info, setLeftMargin: 42.0f64];
+            let _: () = msg_send![&*info, setRightMargin: 42.0f64];
+            let _: () = msg_send![&*info, setJobDisposition: objc2_app_kit::NSPrintSaveJob];
+            let url: Retained<AnyObject> = msg_send![class!(NSURL), fileURLWithPath: &*path_string];
+            let settings: Retained<AnyObject> = msg_send![&*info, dictionary];
+            let _: () = msg_send![&*settings, setObject: &*url, forKey: objc2_app_kit::NSPrintJobSavingURL];
+            let operation: Option<Retained<AnyObject>> = msg_send![&*offscreen.view, printOperationWithPrintInfo: &*info];
+            let operation = operation.ok_or("WebKit could not create a print operation")?;
+            let _: () = msg_send![&*operation, setShowsPrintPanel: false];
+            let _: () = msg_send![&*operation, setShowsProgressPanel: false];
+            let success: bool = msg_send![&*operation, runOperation];
+            if !success { return Err("WebKit could not write the PDF".into()); }
+        }
+        let bytes = std::fs::read(&path).map_err(|error| format!("Could not read the exported PDF: {error}"))?;
+        if !bytes.starts_with(b"%PDF-") { return Err("WebKit did not create a PDF file".into()); }
+        Ok(())
     }
 
     async fn snapshot(

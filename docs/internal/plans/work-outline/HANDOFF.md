@@ -28,6 +28,72 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 86: Needs-you cards in place + smaller coordinator reads** (2026-11-12, eeb144b88; tests for touched
+  crates from f45e1be44: nextest 2500/2502, only the known `peer::actual_webrtc_pair_streams…` and
+  `preview::leak remote_preview_churn` hang; UI 2630/0): a decision sheet's or plan's Needs-you card is keyed on the
+  artifact and updated in place across revisions (a resolved sheet card only reopens on a newer revision; plan
+  questions fold into the one plan card; legacy per-question cards keep working); agents update their own open request
+  through the `dedupeKey` path; a chat that read `~/.agents/skills/*/SKILL.md` or `~/.claude/skills/*/SKILL.md` gets
+  one "<name> skill changed since you loaded it" line on its next message (not on `/` commands);
+  `work_outline_read_subtree` omits completed items unless they hold open requests or live chats (`includeCompleted`,
+  `completedOmitted`; 46 KB → 1.2 KB on a 173-item fixture); `report_to_parent` / `create_chat` suggest STATUS /
+  RESULT / NEXT reports. Backup: `~/zeron-dev-app-backups/mast-release-85`.
+
+- **Release 85: PR #1 (David Wallach) idle CPU + input latency** (2026-11-12, 52ab0bcbb; tests for touched crates
+  from 638cf1008: nextest 1327/1328, only the known Tailscale-only `peer::actual_webrtc_pair_streams…`; UI 2630/0):
+  search index re-walks on repair or rate-limited picker open, idle indexes retire; diff sync ignores foreign git-dir
+  churn but tracks (nested) submodule refs; preview scan backs off to 10 s; sidebar culls far-off rows; composer and
+  pickers redraw less. Backup: `~/zeron-dev-app-backups/mast-release-84`.
+
+- **Release 84: visual audit fixes** (2026-11-12, aa47417fe; full suite from 07ecc9648: nextest 2534/2535, only the
+  known `preview::leak remote_preview_churn` hang; UI 2625/0): decision sheet flow lanes wrap/scroll with attached
+  connectors; row controls (Accept primary, others secondary, monochrome note button, "Your answer" placeholder);
+  Horizon light status dots per state; walkthrough content width; distinct Appearance style tiles; `handoff`
+  ui-preview screen; `artifact_render_check` renders decision-sheet/plan/options JSON by path (optional `kind`).
+  Backup: `~/zeron-dev-app-backups/mast-release-83`.
+
+- **Release 83: artifact export** (2026-11-12, 6379a3c2c; targeted: mast-proto 282, mast-ui artifacts 239): an Export
+  menu in the artifact tab header: standalone HTML (kit CSS inlined, Mermaid from the shared CDN, decision sheets
+  read-only), A4 PDF via offscreen WebKit print (not testable headless; Mikey to try a long plan), Copy as markdown
+  for plans, decision sheets and markdown. Backup: `~/zeron-dev-app-backups/mast-release-82`.
+
+- **Release 82: structured plan artifacts** (2026-11-11, 2ecae0d4b; targeted: mast-proto 279, mast-engine
+  artifacts 43 + agent_tools 62, mast-mcp 55, mast-ui artifacts 235):
+  - New artifact kind `plan` (.json): crates/proto/src/plan.rs (types, strict parse, the 8 rules in
+    docs/artifact-kit/plan-schema.md incl. linked-sheet row checks, `linear_body`) and plan_render.rs (summary chips,
+    build-order strip, ticket cards beside their Linear body, citation chips, collapsed evidence). Example:
+    docs/artifact-kit/plan-example.json (synthetic; the real kit plan stays private). `artifact_get_plan` returns the
+    JSON for plan-kind artifacts; markdown plans unchanged.
+  - Backup: `~/zeron-dev-app-backups/mast-release-81`.
+
+- **Release 81: render check false positives** (2026-11-11, f5a2c6f98; fast-tracked, mast-ui artifacts 234/0): the
+  contrast check falls back to the rendered theme's `--background`, not the OS dark-mode query; `narrowTextColumn`
+  skips empty text, `pre` and cells of tables that fit. Backup: `~/zeron-dev-app-backups/mast-release-80`.
+
+- **Release 80: render check works again** (2026-11-11, d22a2145f; fast-tracked, mast-ui artifacts 234/0):
+  - The in-frame render probe referenced an undefined `metrics` since e8ff10cb4, so `report()` threw and every
+    `artifact_render_check` said "The render probe did not report" (bb6e6f10). The probe now collects
+    `ElementMetrics` (capped at 1,000) for the layout heuristics, and any probe exception still posts a report with
+    "Render probe failed: …". Backup: `~/zeron-dev-app-backups/mast-release-79`.
+
+- **Release 79: hand off to another provider/model** (2026-11-11, 07ecc9648; full suite):
+  - Hand off to new chat (dialog, `HandOffOrchestrator` RPC, `hand_off_orchestrator` MCP) takes optional
+    `harness`, `model`, `reasoning`. The dialog reuses the new-chat picker, preset to the source chat. A different
+    harness starts from its default model; sandbox and Ask/Auto carry over; models are checked against the
+    harness catalog (`hand_off_config` in crates/engine/src/rpc.rs).
+  - Tests (`run_release_tests.sh bd9f573d6`, covering fast-tracked 77/78): nextest 2469/2471 (the two known
+    WebRTC preview tests; crate unchanged), UI 2618/0. Backup: `~/zeron-dev-app-backups/mast-release-78`.
+
+- **Release 78: decision-sheet keys + row outcomes** (2026-11-11, 14ef72b3f; fast-tracked, targeted tests only):
+  - Artifact frames report edit focus (`mastEditFocus`), so a focused note/answer field gets bare-key shortcuts
+    (e/n/p/t/v) and ⌘A/C/V/X/Z. Cmd/Ctrl app shortcuts and browser keys still go to Mast; Esc in a field returns
+    focus to the app (crates/ui/src/browser/macos.rs `key_route`, `FIELD_EDIT_KEYS`).
+  - Rows offer Accept / Answer differently / Don't do this. "Don't do this" (`rejected`) only on `optional: true`
+    rows, enforced by the engine; answers are `decided` + `overrideRecommendation` with the text in `answer` from
+    artifact_get_decisions. Contract: docs/artifact-kit/decision-sheet-schema.md.
+  - Tests: mast-proto 274, mast-ui artifacts 232 + browser 39, mast-engine `--test artifacts` 41. Real WebKit typing
+    not yet confirmed. Backup: `~/zeron-dev-app-backups/mast-release-77`.
+
 - **Release 74: data-driven decision sheets + responsive kit** (2026-11-10, a68e8d99d):
   - `decision-sheet` artifact kind: strict JSON validation, a kit renderer, computed chips, a dedicated 1024 px wide
     host (other fragments keep their cap), compare. Child status pills show only when they differ from the parent.
@@ -1078,9 +1144,110 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
+
+- **Installed: release 86.**
+- **Orchestrator friction** (report mast-artifact:1e838a8e, item 62aa8fe0): Mikey picked all four fixes.
+  - Skill edits are live in `~/.agents/skills` (implement-ticket, project-planner, talk-to-me); backup in
+    `~/skills-backups/2026-11-12-friction/`; awaiting his keep/undo (request 289320e7). He still has to paste the
+    Cofactr Space instruction and tell the kit coordinator (now 766c6a8e) to re-read the skills.
+  - Cards in place shipped in 86.
+  - Quiet wakes research (branch `orchestrator-quiet-wakes`, `docs/internal/plans/quiet-wakes.md`): holding routine
+    wakes saves ~4% of cache reads, so it's shelved, along with Jev stall triage. Coordinator context growth
+    (110k → 566k per call) drives the Opus cost. Proposed next: a coordinator size meter plus hand-off past ~200k;
+    awaiting Mikey. Coordinator reach and answer routing (D/E) are still wanted for friction.
+- **Running:** workflow pack (Terra 2bbe25e5) as before.
+- **Waiting on Mikey:** pinned tabs A (eb86590b); skill edits (289320e7); older a53732a1, 204f55c6, 99cf645c, 1ad5d3ee.
+
+## In flight (snapshot 2026-11-12; coordinator f89abb61 handing off)
+
+- **Installed: release 85.** Releases 78–85 this session: sheet note keys + Accept/Answer differently/Don't do this
+  (78), hand off picks harness/model (79, full suite), render check fixed (80, 81), structured `plan` artifact kind
+  (82), artifact Export HTML/PDF/markdown (83), visual audit fixes (84, full suite), PR #1 idle CPU (85).
+- **Running:**
+  - Workflow pack, Terra chat 2bbe25e5, branch `workflow-pack`. It ends its turn after a commit or two, so nudge it
+    with "continue until Ready to merge". Left: apply item creation + undo, MCP tools, confirmed apply, Settings UI.
+  - Orchestrator-friction audit, Sonnet chat c8dce614, item 62aa8fe0: why planning with orchestrators is frustrating,
+    using the Cofactr kit redesign chats (coordinator 532a490a), plus the phase 0 go/no-go (9516dd7c). Raises
+    "Review: orchestrator friction".
+- **Waiting on Mikey:** pinned tabs A revised (mast-artifact:18746fbb, request eb86590b: overflow rule, initials tiles in
+  the Space colour derived from the id, Pinned group in the sidebar); older: active-checkout design (a53732a1),
+  agent setup audit (204f55c6), iOS research (99cf645c), Horizon worker idle (1ad5d3ee).
+- **Next queued:** build pinned tabs once decided; approach questions with 2–3 options (7db226ae); freeze watchdog
+  (17c9d278); perf follow-ups (2694931e, partly covered by PR #1); render-check overlap heuristic flags wrapped
+  inline `code` chips (noise); verify release 84's sheet fixes with artifact_render_check on
+  docs/artifact-kit/decision-sheet-example.json after Mikey restarts.
+- **Mikey still has to paste into the Cofactr kit chat 532a490a** (other Space, unreachable): re-read
+  project-planner, republish the plan as `kind: "plan"`, mark droppable sheet rows `optional: true`.
+- **Rules learned this session:**
+  - `main` is fast-forwarded to the integration head in both repos after every push.
+  - The Cofactr palette is for Mast branding assets only; UI styles (Default, Industrial, Horizon) are deliberate and
+    judged on their own intent. The Area taste (one surface, no lines) applies to Area only.
+  - Review worker visuals yourself before merging: `artifact_render_check` (artifacts; also JSON by path since 84)
+    and `scripts/ui-preview.sh` (Mast screens, offscreen PNGs; `handoff` screen exists). UI workers attach a sheet.
+  - Disk: orphaned `*.rcgu.o` (`find <target> -name '*.rcgu.o' -links 1 -mmin +15 -delete`) freed ~65 GB at once.
+  - Admin grants are per Space; Cofactr chats need a read-only snapshot (~/mast-metrics, .worktrees/phase0-data).
+
+## In flight (snapshot 2026-11-11 evening; coordinator f89abb61)
+
+- **Installed: release 85** (PR #1; touched-crate tests on top of full-suite release 84).
+- **Auditing:** orchestrator friction in the Cofactr kit redesign chats + phase 0 go/no-go (item 62aa8fe0, Sonnet chat
+  c8dce614; read-only snapshot under ~/mast-metrics/snapshots/2026-11-12-friction).
+- **Visual audit** 2026-11-12 (mast-artifact:d3e9de4d rev 3): 7 bug fixes shipped in release 84. Style colours of
+  Horizon/Industrial are deliberate, not findings; the Cofactr palette is for branding only. Pinned tabs A revised
+  (mast-artifact:18746fbb, request eb86590b) awaits Mikey's three decisions.
+- **Plans are structured now:** the kit plan published as kind `plan` renders clean in the app (test artifact
+  5381891f on the Mast Dev item). The project-planner skill (~/.agents/skills, backup
+  ~/zeron-dev-app-backups/skills-2026-11-11-project-planner-v2) now publishes plan JSON per
+  docs/artifact-kit/plan-schema.md and copies each ticket's generated Linear body. Follow-up: the overlap
+  heuristic flags wrapped inline `code` chips (noise). Workflow pack (2bbe25e5) still in progress.
+- **PR #1 approved** on GitHub at c6bf195c1 (Mikey: approve if good) with two non-blocking follow-ups; not merged.
+- **PR #1 (David Wallach, idle CPU + input latency):** reviewed (item 953b96ee, Required Action 08002e19):
+  merge after three fixes (nested-submodule diff filter, scheduled-run backfill marker, @-completion freshness on
+  over-budget checkouts). David force-pushed c6bf195c1 (dropped the scheduled-task commit, so the backfill finding is gone); two
+  findings remain. Waiting on Mikey: David fixes vs we fix. Review checkout `.worktrees/zeron/mast-pr-1`.
+- **main is kept current (Mikey, 2026-11-11):** after each integration push the coordinator fast-forwards `main` in
+  both repos (`git push origin origin/work-outline-implementation:refs/heads/main`; parent `zeron-work-outline`).
+  Fast-forward only. Workers never touch main.
+- **Resumed:** Terra chat 2bbe25e5 (workflow-pack export/import, branch `workflow-pack`).
+- **Next queued:** approach-question options (7db226ae); global pinned-chat tabs strip (design
+  mast-artifact:6b34d7fb, Mikey picked A, global); freeze watchdog (17c9d278), render-probe bug (bb6e6f10), perf
+  follow-ups (2694931e); Phase 0 go/no-go (9516dd7c) was due 11-12.
+
+## In flight (snapshot 2026-11-11 late; coordinator 844aab58 handing off)
+
+- **Installed: release 77** (fast-tracked; targeted tests only). It has the decision sheet Send fix (be62a4719), row
+  ids, batched decisions, the queue silent-drop fix, the usage-only menu bar, and smaller dev builds (7c53f6b54).
+  The next normal release must run the full suite.
+- **Running, URGENT (Mikey is blocked):** Terra chat 921177a0, branch `sheet-note-keys`, item e6f833a5.
+  - Fixes the decision-sheet note field dropping e/n/p/t/v (Mast shortcuts swallow keys while a web input is
+    focused).
+  - Replaces Reject with **Accept / Answer differently / Don't do this**. "Don't do this" shows only on
+    `optional: true` rows.
+  - When it pushes: review, merge, then fast release 78 with the pattern in /tmp/release77-run.sh (targeted tests +
+    installed build, detached via python setsid), install, and tell Mikey to restart.
+- **Paused:** Terra chat 2bbe25e5 (workflow-pack export/import, branch `workflow-pack`). Tell it to resume cargo
+  after release 78.
+- **Next queued:**
+  - Approach questions with 2–3 selectable options (7db226ae)
+  - Global pinned-chat tabs strip in the main titlebar, across Spaces (Mikey picked A, global; design
+    mast-artifact:6b34d7fb; not started)
+  - Freeze watchdog (17c9d278), render-probe bug (bb6e6f10), perf follow-ups (2694931e)
+  - Phase 0 go/no-go (9516dd7c) was due 11-12.
+- **Process rules from today:**
+  - At most 2 building workers.
+  - New worktrees get `.cargo/config.toml` with incremental off.
+  - Workers never delete anything; the coordinator frees disk (main `target/debug/incremental` and
+    `target/installed` are safe).
+  - Releases run detached.
+  - Mikey reviews visuals, so look at worker screenshots before merging.
+- **Skills** (one copy each in ~/.agents/skills): project-planner now has scope vs approach questions, an
+  `optional` flag, no boilerplate questions, batched decisions via artifact_get_decisions, and ids in chat.
+  talk-to-me has the LLM-tics table.
+
 ## In flight (snapshot 2026-11-10 17:30; coordinator 844aab58, near its weekly limit)
 
-- **Installed: release 75** (decision sheet v2 layout; restart needed). Row Accept/Reject still item 3b9a83cb.
+- **Installed: release 77** (fast-tracked: decision sheet Send fix be62a4719 + row ids; targeted tests only — run a full release suite with the next release).
 - **Running:** Terra chat d1ac228d (item 3b9a83cb, branch `decision-sheet-v2`, worktree `.worktrees/zeron/decision-sheet-v2`).
   - Mikey picked the decision-sheet redesign "B + C": B's "Needs you" list with Accept/Reject on top, C's tinted
     flow chips below.
@@ -1622,9 +1789,14 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
 
 - **Worktrees:** `<home>/Projects/agent-mode-tools/.worktrees/zeron/<branch>`, branched from
   the integration head. Seed the build cache with
-  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file.
+  `cp -c -R target/debug/{deps,build,.fingerprint}` (APFS clones), add a `.workspace-root` file,
+  and write `.cargo/config.toml` with `[build]\nincremental = false` (untracked; `.cargo/` is in
+  info/exclude). Incremental caches were roughly 20 GB per worktree.
   Merge with `--no-ff` into `work-outline-implementation`. **Delete each worktree's `target/` after
-  merging**; keep at least 100 GB free.
+  merging**; keep at least 100 GB free. **At most 2 building workers at once.**
+  Since 7c53f6b54, dev builds use line tables only and no dependency debug info.
+  If disk still nears 100 GB, clear `target/debug/incremental` and `target/installed` in the main
+  checkout; both rebuild.
 - **Subagents:** one narrow task per agent with clear file ownership; read files in ≤200-line
   slices (they stall on huge files like `overview.rs` / `shell.rs`); commit early and often.
 - **Tests:** release runs use `caffeinate -i scripts/run_release_tests.sh [BASE_REF]` (nextest
@@ -1653,7 +1825,7 @@ status write-back, a "Waiting for input" group (declined), Tod-style action log 
   computer-use.
 - Never write to live `~/.zeron` stores; inspect with read-only sqlite `.backup` copies.
 - No real Linear/GitHub API calls in tests. Nothing is ever written to Linear.
-- Never commit or push to `main`.
+- Never commit to `main` directly; the coordinator fast-forwards it to the integration head after each push.
 - Registry operation ids must be ≤ 64 characters; hash long keys with `derive_id`.
 - **The Mast repo is public.** Never write these into it (docs, commits, fixtures):
   - device IDs (UDIDs), team IDs, account logins or emails

@@ -6,6 +6,7 @@
 .mk-section { color: var(--mk-sage); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 24px 0 8px; }
 .mk-muted { color: var(--muted-foreground); }
 .mk-mono { font-family: var(--font-mono); overflow-wrap: normal; word-break: normal; }
+.mk-row-id { color: var(--muted-foreground); font: 11px var(--font-mono); white-space: nowrap; }
 .mk-id { word-break: normal; overflow-wrap: normal; }
 .mk-chips, .mk-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
 .mk-legend { gap: 14px; color: var(--muted-foreground); font-size: 12px; }
@@ -91,3 +92,9 @@
 .mk-step-params, .mk-does-not-happen { color: var(--muted-foreground); font-size: 12px; margin: 4px 2px 0; overflow-x: auto; overflow-wrap: normal; word-break: normal; }
 @container (max-width: 700px) { .mk-lane { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @container (max-width: 380px) { .mk-lane { grid-template-columns: 1fr; } }
+
+/* Keep each flow's steps together and readable at every card width. */
+.mk-sheet .mk-lane { display: flex; flex-direction: row; overflow-x: auto; align-items: stretch; gap: 24px; padding-bottom: 6px; }
+.mk-sheet .mk-lane .mk-step { position: relative; flex: 0 0 160px; min-width: 0; }
+.mk-sheet .mk-lane .mk-step + .mk-step::before { content: '→'; position: absolute; left: -19px; top: 12px; color: var(--mk-sage); }
+.mk-sheet .mk-step-chip, .mk-sheet .mk-step-params { overflow-wrap: anywhere; }

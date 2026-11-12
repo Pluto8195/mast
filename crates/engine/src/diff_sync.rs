@@ -1121,9 +1121,12 @@ fn build_watchers(
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
         let tx = kick_tx.clone();
+        let git_dir = identity.git_dir.clone();
         let watcher =
             crate::watch_budget::Watcher::new(move |event: Result<notify::Event, notify::Error>| {
-                if event.as_ref().is_ok_and(is_checkout_change) {
+                if event.as_ref().is_ok_and(|event| {
+                    is_checkout_change(event) && kick_relevant(&event.paths, &git_dir)
+                }) {
                     let _ = tx.send(());
                 }
             });
@@ -1140,6 +1143,39 @@ fn build_watchers(
         }
     }
     watchers
+}
+
+/// Whether a watch event can change this checkout's diff. A superproject's
+/// `.git` also holds every submodule's and linked worktree's git dir, whose
+/// index, object and reflog churn would otherwise re-capture the parent on each
+/// foreign git command. A submodule's HEAD/refs still count: they move the
+/// parent's gitlink. Anything not known to be irrelevant counts, and the repair
+/// tick covers what a skipped event could have missed.
+fn kick_relevant(paths: &[PathBuf], git_dir: &Path) -> bool {
+    if paths.is_empty() {
+        return true;
+    }
+    paths.iter().any(|path| {
+        let Ok(relative) = path.strip_prefix(git_dir) else {
+            return true;
+        };
+        let parts: Vec<_> = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect();
+        if parts.last().is_some_and(|name| name.ends_with(".lock")) {
+            return false;
+        }
+        match parts.first().map(|part| part.as_ref()) {
+            Some("objects" | "logs" | "worktrees" | "FETCH_HEAD" | "ORIG_HEAD") => false,
+            Some("modules") if parts.len() > 2 => {
+                parts[2..].iter().any(|part| {
+                    matches!(part.as_ref(), "HEAD" | "refs" | "packed-refs")
+                })
+            }
+            _ => true,
+        }
+    })
 }
 
 /// Reads cannot change a diff, and Git's own reads must not trigger another scan.
@@ -3083,8 +3119,10 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         Capture, CheckoutIdentity, MAX_EXPANDED_SUBMODULES, MAX_SUBMODULE_METADATA_BYTES,
-        MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, parse_raw_diff, watch_targets,
+        MAX_WATCH_DIRS, SubmoduleBudget, exceeds_watch_budget, kick_relevant, parse_raw_diff,
+        watch_targets,
     };
+    use std::path::{Path, PathBuf};
 
     #[tokio::test]
     async fn branch_review_base_counts_commits_without_fetching() {
@@ -3198,6 +3236,46 @@ mod watch_budget_tests {
             root: root.to_path_buf(),
             git_dir: git_dir.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn foreign_git_churn_does_not_kick_a_capture() {
+        let git_dir = Path::new("/repo/.git");
+        let kicks = |paths: &[&str]| {
+            kick_relevant(
+                &paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
+                git_dir,
+            )
+        };
+        assert!(kicks(&[]), "rescans count");
+        assert!(kicks(&["/repo/src/main.rs"]), "working-tree edits count");
+        assert!(kicks(&["/repo/.git/HEAD"]));
+        assert!(kicks(&["/repo/.git/index"]));
+        assert!(kicks(&["/repo/.git/refs/heads/main"]));
+        assert!(kicks(&["/repo/.git/info/exclude"]), "unknown git files count");
+        assert!(kicks(&["/repo/.git/modules/ui/HEAD"]), "submodule HEAD moves the gitlink");
+        assert!(kicks(&["/repo/.git/modules/ui/refs/heads/main"]));
+        for module in ["components/ui", "outer/modules/inner"] {
+            for reference in ["HEAD", "refs/heads/main", "packed-refs"] {
+                assert!(kicks(&[&format!(
+                    "/repo/.git/modules/{module}/{reference}"
+                )]));
+            }
+            for noise in ["index", "objects/ab/cdef", "refs/heads/main.lock"] {
+                assert!(!kicks(&[&format!("/repo/.git/modules/{module}/{noise}")]));
+            }
+        }
+        assert!(!kicks(&["/repo/.git/modules/ui/index"]));
+        assert!(!kicks(&["/repo/.git/modules/flagship/worktrees/wt/index"]));
+        assert!(!kicks(&["/repo/.git/worktrees/wt/HEAD"]));
+        assert!(!kicks(&["/repo/.git/objects/ab/cdef"]));
+        assert!(!kicks(&["/repo/.git/logs/HEAD"]));
+        assert!(!kicks(&["/repo/.git/index.lock"]));
+        assert!(!kicks(&["/repo/.git/FETCH_HEAD"]));
+        assert!(
+            kicks(&["/repo/.git/objects/ab/cdef", "/repo/.git/HEAD"]),
+            "any relevant path in a batch counts"
+        );
     }
 
     #[test]

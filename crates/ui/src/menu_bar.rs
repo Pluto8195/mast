@@ -638,6 +638,32 @@ pub(crate) fn insert_requests(view: &mut MenuView, mut requests: Vec<RequestPrev
     view.items.splice(1..1, items);
 }
 
+/// Usage and, when enabled, chats that need the user.
+pub fn build_usage_menu<Tz: TimeZone>(input: &MenuInput<'_>, show_needs_you: bool, tz: &Tz) -> MenuView
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let mut items = vec![Item::Title("Mast".into())];
+    if show_needs_you {
+        let needs: Vec<_> = input.snapshot.entries().filter_map(|entry| match entry {
+            Entry::Row(row) if row.state.needs_you() => Some(row),
+            _ => None,
+        }).collect();
+        if !needs.is_empty() {
+            items.push(Item::Section(format!("Needs you · {}", needs.len())));
+            items.extend(needs.iter().take(MAX_CHAT_ROWS).map(|row| chat_item(row)));
+        }
+    }
+    items.extend(usage_items(input.usage, input.now, tz));
+    items.push(Item::Separator);
+    items.push(Item::Action { action: MenuAction::OpenMast, label: "Open Mast".into() });
+    MenuView {
+        glyph: Glyph { light: AppLight::Idle, ring: false, bars: GlyphBars::from_usage(input.usage.accounts()) },
+        tooltip: "Mast · Usage".into(),
+        items,
+    }
+}
+
 /// The whole menu: headline, Needs you first, Running, Interrupted, Usage,
 /// then restart / Open Mast / Quit.
 pub fn build_menu<Tz: TimeZone>(input: &MenuInput<'_>, tz: &Tz) -> MenuView

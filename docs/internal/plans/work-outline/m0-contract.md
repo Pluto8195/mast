@@ -1030,7 +1030,10 @@ ambiguous rule or a gap later work must close.
 2. **Rows.** `userActionRequests`: `spaceId`, `workItemId`, `chatId`, `messageId`,
    `toolCallId` (the audit's single `messageRef` is split into two immutable fields), `text`,
    `info`, `dedupeKey`, `createdBy`, `createdAt`, `inputsHash`, `v`, then `state` + ONE-field
-   `resolution {by, at, note?}` written in one op. `workItemInstructionProposals`: `spaceId`,
+   `resolution {by, at, note?}` written in one op. Open request content and origin can be
+   updated in place; identity, creation provenance, and resolution remain fixed. The system may
+   migrate a legacy artifact approval key to its artifact-scoped key.
+   `workItemInstructionProposals`: `spaceId`,
    `target`, `text`, `proposedBy`, `sourceRef`, `createdAt`, `inputsHash`, `v`, then ONE-field
    `review {state, by, at, reason?, instructionId?}`. The audit's `target.instructionId` /
    `expectedVersion` are not written (modification proposals stay deferred). Both kinds are in

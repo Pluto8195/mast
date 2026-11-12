@@ -249,6 +249,52 @@ impl RegistryDoc {
         }
     }
 
+    /// Atomically replace answers without dropping any to fit the operation budget.
+    pub fn set_artifact_answers_exact(
+        &mut self, id: &str, answers: &[mast_proto::ArtifactQuestionAnswer], now_ms: i64,
+    ) -> Result<bool, DocError> {
+        if self.artifact(id).is_none() { return Ok(false); }
+        self.observe_row(KIND_ARTIFACTS, id);
+        let op = RowOp {
+            kind: KIND_ARTIFACTS.to_owned(), id: id.to_owned(), op: OpKind::Update,
+            set: Some(BTreeMap::from([
+                ("answers".to_owned(), serde_json::to_value(answers)?),
+                ("updatedAt".to_owned(), Value::from(now_ms)),
+            ])),
+            hlc: self.next_hlc(), clocks: None,
+        };
+        check_op_size(&op)?;
+        self.write_ops(vec![op])?;
+        Ok(true)
+    }
+
+    /// Atomically replace a sheet's decisions. Oversized batches fail intact.
+    pub fn set_artifact_decisions(
+        &mut self,
+        id: &str,
+        decisions: &[mast_proto::decision_sheet::SheetDecision],
+        now_ms: i64,
+    ) -> Result<bool, DocError> {
+        if self.artifact(id).is_none() {
+            return Ok(false);
+        }
+        self.observe_row(KIND_ARTIFACTS, id);
+        let op = RowOp {
+            kind: KIND_ARTIFACTS.to_owned(),
+            id: id.to_owned(),
+            op: OpKind::Update,
+            set: Some(BTreeMap::from([
+                ("decisions".to_owned(), serde_json::to_value(decisions)?),
+                ("updatedAt".to_owned(), Value::from(now_ms)),
+            ])),
+            hlc: self.next_hlc(),
+            clocks: None,
+        };
+        check_op_size(&op)?;
+        self.write_ops(vec![op])?;
+        Ok(true)
+    }
+
     /// Replace the artifact's comments (the `comments` field only). When the
     /// op does not fit, the oldest resolved comment is dropped first, else
     /// the oldest. `None` when the artifact is not live.
@@ -360,6 +406,30 @@ mod tests {
             updated_at: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn sheet_decisions_are_written_together_and_survive_revision_updates() {
+        use mast_proto::decision_sheet::{DecisionOutcome, SheetDecision};
+        let mut doc = RegistryDoc::new("dev-1");
+        doc.put_artifact(&view("a1", "item-1", 1)).unwrap();
+        let decisions = vec![SheetDecision {
+            row_id: "D-2".into(),
+            outcome: DecisionOutcome::Decided,
+            override_recommendation: false,
+            note: Some("yes".into()),
+            at: 2,
+            revision: 1,
+        }];
+        assert!(doc.set_artifact_decisions("a1", &decisions, 2).unwrap());
+        let mut revision = doc.artifact("a1").unwrap();
+        revision.current_revision = 2;
+        doc.put_artifact(&revision).unwrap();
+        assert_eq!(doc.artifact("a1").unwrap().decisions, decisions);
+        assert!(
+            !doc.set_artifact_decisions("missing", &decisions, 2)
+                .unwrap()
+        );
     }
 
     #[test]

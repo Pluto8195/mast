@@ -41,7 +41,7 @@ pub use crate::work_outline_order::MAX_ORDER_KEY_LEN;
 use crate::work_outline_user_actions::{
     ApproveWorkItemInstructionProposalParams, CreateUserActionRequestParams,
     ProposeWorkItemInstructionParams, RejectWorkItemInstructionProposalParams,
-    ResolveUserActionRequestParams, UserActionRequestView, WorkItemInstructionProposalView,
+    ResolveUserActionRequestParams, UpdateUserActionRequestParams, UserActionRequestView, WorkItemInstructionProposalView,
 };
 
 /// Hard limits enforced by typed mutators (doc crate) and the engine service,
@@ -1521,6 +1521,7 @@ pub enum WorkOutlineMutation {
     ConfigureExecution(ConfigureExecutionParams),
     // ── Milestone 4 ──
     CreateUserActionRequest(CreateUserActionRequestParams),
+    UpdateUserActionRequest(UpdateUserActionRequestParams),
     ResolveUserActionRequest(ResolveUserActionRequestParams),
     ProposeWorkItemInstruction(ProposeWorkItemInstructionParams),
     ApproveWorkItemInstructionProposal(ApproveWorkItemInstructionProposalParams),
@@ -1566,6 +1567,7 @@ impl WorkOutlineMutation {
             Self::KeepInstructionSession(p) => &p.operation_id,
             Self::ConfigureExecution(p) => &p.operation_id,
             Self::CreateUserActionRequest(p) => &p.operation_id,
+            Self::UpdateUserActionRequest(p) => &p.request.operation_id,
             Self::ResolveUserActionRequest(p) => &p.operation_id,
             Self::ProposeWorkItemInstruction(p) => &p.operation_id,
             Self::ApproveWorkItemInstructionProposal(p) => &p.operation_id,
@@ -1607,6 +1609,7 @@ impl WorkOutlineMutation {
             Self::KeepInstructionSession(_) => "keepInstructionSession",
             Self::ConfigureExecution(_) => "configureExecution",
             Self::CreateUserActionRequest(_) => "createUserActionRequest",
+            Self::UpdateUserActionRequest(_) => "updateUserActionRequest",
             Self::ResolveUserActionRequest(_) => "resolveUserActionRequest",
             Self::ProposeWorkItemInstruction(_) => "proposeWorkItemInstruction",
             Self::ApproveWorkItemInstructionProposal(_) => "approveWorkItemInstructionProposal",

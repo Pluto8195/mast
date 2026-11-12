@@ -51,6 +51,8 @@ pub(crate) struct ElementMetrics {
     pub(crate) pscroll: bool,
     /// A text block (own text, only inline children): its line count and
     /// word count.
+    #[serde(rename = "tableFits")]
+    pub(crate) table_fits: bool,
     pub(crate) leaf: bool,
     pub(crate) lines: u32,
     pub(crate) words: u32,
@@ -115,7 +117,14 @@ pub(crate) fn classify(metrics: &[ElementMetrics], viewport_width: u32) -> Vec<R
             push(CLIPPED_TEXT, m.sel.clone(), &m.text);
         }
         // Narrow text column: a block of 3+ lines averaging under 2 words.
-        if m.leaf && m.lines >= 3 && f64::from(m.words) / f64::from(m.lines) < 2.0 {
+        if m.leaf
+            && m.words > 0
+            && !m.text.trim().is_empty()
+            && !m.table_fits
+            && !m.sel.starts_with("pre")
+            && m.lines >= 3
+            && f64::from(m.words) / f64::from(m.lines) < 2.0
+        {
             push(NARROW_TEXT_COLUMN, m.sel.clone(), &m.text);
         }
         // Wider than a parent that does not scroll.
@@ -300,7 +309,18 @@ mod tests {
         short.leaf = true;
         short.lines = 2;
         short.words = 2;
-        let found = classify(&[column, normal, short], 1440);
+        let mut empty = column.clone();
+        empty.y += 100;
+        empty.text.clear();
+        empty.words = 0;
+        let mut code = column.clone();
+        code.y += 200;
+        code.sel = "pre.code".into();
+        let mut cell = column.clone();
+        cell.y += 300;
+        cell.sel = "td.cell".into();
+        cell.table_fits = true;
+        let found = classify(&[column, normal, short, empty, code, cell], 1440);
         assert_eq!(kinds(&found), [NARROW_TEXT_COLUMN]);
         assert_eq!(found[0].selector, "p.narrow");
     }

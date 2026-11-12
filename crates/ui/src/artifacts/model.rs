@@ -82,7 +82,7 @@ pub(crate) fn kind_icon(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Mermaid => crate::icons::WIDGET,
         ArtifactKind::Image => crate::icons::FILE_IMAGE,
         ArtifactKind::Options => crate::icons::SPLIT_COLUMNS,
-        ArtifactKind::Review | ArtifactKind::DecisionSheet => crate::icons::DOCUMENT,
+        ArtifactKind::Review | ArtifactKind::DecisionSheet | ArtifactKind::Plan => crate::icons::DOCUMENT,
         ArtifactKind::Unknown => crate::icons::DOCUMENT,
     }
 }
@@ -97,6 +97,7 @@ pub(crate) fn kind_label(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Options => "Options",
         ArtifactKind::Review => "Review",
         ArtifactKind::DecisionSheet => "Decision sheet",
+        ArtifactKind::Plan => "Plan",
         ArtifactKind::Unknown => "File",
     }
 }
@@ -282,6 +283,7 @@ pub(crate) fn review_head_drift<'a>(
 pub(crate) enum WebKind {
     Fragment,
     DecisionSheet,
+    Plan,
     Page,
     Mermaid,
     /// An image shown in the web wrapper (render checks only).
@@ -333,6 +335,10 @@ pub(crate) fn body_for(kind: ArtifactKind, reply: &ArtifactContentReply) -> Arti
                 ArtifactKind::Mermaid => ArtifactBody::Web {
                     kind: WebKind::Mermaid,
                     source: text,
+                },
+                ArtifactKind::Plan => match mast_proto::plan::Plan::parse(&text) {
+                    Ok(plan) => ArtifactBody::Web { kind: WebKind::Plan, source: mast_proto::plan_render::render(&plan) },
+                    Err(error) => ArtifactBody::Invalid(error),
                 },
                 ArtifactKind::DecisionSheet => {
                     match mast_proto::decision_sheet::DecisionSheet::parse(&text) {

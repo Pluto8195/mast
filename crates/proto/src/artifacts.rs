@@ -144,6 +144,7 @@ pub enum ArtifactKind {
     Review,
     #[serde(alias = "decision-sheet")]
     DecisionSheet,
+    Plan,
     #[default]
     #[serde(other)]
     Unknown,
@@ -160,6 +161,7 @@ impl ArtifactKind {
             Self::Options => "options",
             Self::Review => "review",
             Self::DecisionSheet => "decision-sheet",
+            Self::Plan => "plan",
             Self::Unknown => "unknown",
         }
     }
@@ -176,6 +178,7 @@ impl ArtifactKind {
             "options" => Some(Self::Options),
             "review" => Some(Self::Review),
             "decision-sheet" | "decisionSheet" => Some(Self::DecisionSheet),
+            "plan" => Some(Self::Plan),
             _ => None,
         }
     }
@@ -214,7 +217,13 @@ impl ArtifactKind {
     pub fn is_visual(self) -> bool {
         matches!(
             self,
-            Self::HtmlFragment | Self::HtmlPage | Self::Mermaid | Self::Image | Self::Options | Self::DecisionSheet
+            Self::HtmlFragment
+                | Self::HtmlPage
+                | Self::Mermaid
+                | Self::Image
+                | Self::Options
+                | Self::DecisionSheet
+                | Self::Plan
         )
     }
 }
@@ -320,6 +329,9 @@ pub struct ArtifactView {
     /// Answers given in Mast to the plan's questions (Artifacts phase 3 D).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<ArtifactQuestionAnswer>,
+    /// Decisions sent for a decision sheet, retained across revisions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<crate::decision_sheet::SheetDecision>,
     /// Comments on the rendered artifact (Artifacts phase 4 G). Never in the file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<ArtifactComment>,

@@ -24,6 +24,7 @@ pub enum NotificationsEvent {
         background_only: bool,
         live_app_icon: bool,
         menu_bar_item: bool,
+        menu_bar_needs_you: bool,
     },
 }
 
@@ -37,6 +38,7 @@ pub struct NotificationsPage {
     background_only: bool,
     live_app_icon: bool,
     menu_bar_item: bool,
+    menu_bar_needs_you: bool,
 }
 
 impl EventEmitter<NotificationsEvent> for NotificationsPage {}
@@ -51,6 +53,7 @@ enum NotificationPreference {
     BackgroundOnly,
     LiveAppIcon,
     MenuBarItem,
+    MenuBarNeedsYou,
 }
 
 fn is_switch_activation(key: &str, is_held: bool) -> bool {
@@ -88,6 +91,7 @@ impl NotificationsPage {
         background_only: bool,
         live_app_icon: bool,
         menu_bar_item: bool,
+        menu_bar_needs_you: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -100,6 +104,7 @@ impl NotificationsPage {
             background_only,
             live_app_icon,
             menu_bar_item,
+            menu_bar_needs_you,
         }
     }
 
@@ -113,6 +118,7 @@ impl NotificationsPage {
             background_only: self.background_only,
             live_app_icon: self.live_app_icon,
             menu_bar_item: self.menu_bar_item,
+            menu_bar_needs_you: self.menu_bar_needs_you,
         });
     }
 
@@ -126,6 +132,7 @@ impl NotificationsPage {
             NotificationPreference::BackgroundOnly => &mut self.background_only,
             NotificationPreference::LiveAppIcon => &mut self.live_app_icon,
             NotificationPreference::MenuBarItem => &mut self.menu_bar_item,
+            NotificationPreference::MenuBarNeedsYou => &mut self.menu_bar_needs_you,
         };
         *value = !*value;
         self.emit(cx);
@@ -161,6 +168,7 @@ impl Render for NotificationsPage {
         let background_only = self.background_only;
         let live_app_icon = self.live_app_icon;
         let menu_bar_item = self.menu_bar_item;
+        let menu_bar_needs_you = self.menu_bar_needs_you;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
             // Keep the familiar 32×18 visual inside a 40×40 activation target.
             // Disabled subordinate controls remain named switches in the
@@ -455,8 +463,7 @@ impl Render for NotificationsPage {
                                 vec![
                                     div()
                                         .child(SharedString::from(
-                                            "Show the Mast lamp in the macOS menu bar: what is running, what needs \
-                                             you, and session and weekly usage for each account.",
+                                            "Show account usage in the macOS menu bar.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -475,6 +482,14 @@ impl Render for NotificationsPage {
                             cx,
                         ),
                     ),
+            )
+            .child(
+                widgets::card_row(&theme, false)
+                    .child(widgets::row_tile(&theme, icons::BELL))
+                    .child(div().flex_1().min_w_0().flex().flex_col()
+                        .child(widgets::row_title(&theme, "Show in menu bar"))
+                        .child(widgets::meta_line(&theme, vec![div().child(if menu_bar_needs_you { "Usage and Needs you" } else { "Usage only (default)" }).into_any_element()])))
+                    .child(interactive_switch(toggle("notifications-menu-bar-needs-you-toggle", "Usage and Needs you", menu_bar_needs_you, true), accent, NotificationPreference::MenuBarNeedsYou, cx)),
             );
 
         let scrollbar = popover::rail(self, "notifications-page-scrollbar", &theme, cx);

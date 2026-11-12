@@ -176,7 +176,7 @@ fn industrial_chat_shell_renders_light_and_dark(cx: &mut TestAppContext) {
         state.data_dir = Some(dir.path().to_path_buf());
     });
     let boot = EngineBootConfig { data_dir: dir.path().to_path_buf(), ipc_port: 0, edge_url: "http://127.0.0.1:1".into(), edge_token: None, org_id: None, workos_client_id: None, default_harness: mast_proto::HarnessId::Mock };
-    let (_, vcx) = cx.add_window_view(|_, cx| {
+    let (shell, vcx) = cx.add_window_view(|_, cx| {
         let mut shell = Shell::new(state.clone(), boot, cx);
         shell.route = Route::Chat;
         shell.active_chat = "c0".into();
@@ -191,6 +191,33 @@ fn industrial_chat_shell_renders_light_and_dark(cx: &mut TestAppContext) {
         });
         assert!(vcx.debug_bounds("composer-surface").is_some());
     }
+    let sidebar = shell.read_with(vcx, |shell, _| shell.sidebar_pane.clone());
+    let before = sidebar.read_with(vcx, |pane, _| pane.renders);
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_collapsed = true;
+        shell.sidebar_tween = None;
+        cx.notify();
+    });
+    for i in 0..5 {
+        state.update(vcx, |state, cx| {
+            state.chats[0].title = Some(format!("Changed while hidden {i}"));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+    assert_eq!(sidebar.read_with(vcx, |pane, _| pane.renders), before,
+        "collapsed sidebar must not render even when its state changes");
+    shell.update(vcx, |shell, cx| {
+        shell.settings.sidebar_collapsed = false;
+        cx.notify();
+    });
+    vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+    assert!(sidebar.read_with(vcx, |pane, _| pane.renders) > before,
+        "expanding must remount the sidebar with current state");
 }
 
 fn totals(counters: &[Counter]) -> Vec<(&'static str, u64)> {
@@ -343,6 +370,35 @@ fn streaming_one_chat_among_many_notifies_few_views(cx: &mut TestAppContext) {
         cx.run_until_parked();
     }
     let after_selected = totals(&counters);
+
+    for i in 0..50 {
+        state.update(cx, |state, cx| {
+            state.chats[0].last_message_preview = Some(format!("selected preview {i}"));
+            state.chats[0].last_seen_at = Some(Utc::now());
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+    let selected_previews = delta(&after_selected, &totals(&counters));
+    for (name, count) in &selected_previews {
+        if matches!(*name, "composer" | "pickers") {
+            assert_eq!(
+                *count, 0,
+                "{name} must ignore preview and read-marker changes"
+            );
+        }
+    }
+    let before_config = totals(&counters);
+    state.update(cx, |state, cx| {
+        state.chats[0].actual_model = Some("updated-model".into());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    for (name, count) in delta(&before_config, &totals(&counters)) {
+        if matches!(name, "composer" | "pickers") {
+            assert!(count > 0, "{name} must follow model changes");
+        }
+    }
 
     eprintln!("PERF notifies per view (50 updates each)");
     eprintln!(
@@ -652,5 +708,80 @@ fn bench_profile_startup(cx: &mut TestAppContext) {
     eprintln!(
         "BENCH startup | loaded sidebar draw | ms={:.2}",
         started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// Cost of one sidebar redraw with a long one-list session history, the case
+/// any Shell notification pays while the sidebar is mounted.
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_sidebar_redraw_with_many_sessions(cx: &mut TestAppContext) {
+    struct SidebarHost(Entity<Shell>);
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |shell, cx| {
+                div()
+                    .w(px(320.0))
+                    .h(px(900.0))
+                    .child(shell.render_chat_sidebar(&Theme::default(), cx))
+            })
+        }
+    }
+    const SESSIONS: usize = 1_000;
+    const REDRAWS: u32 = 30;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+    });
+    let (host, vcx) = cx.add_window_view(|_, cx| {
+        SidebarHost(cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: mast_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.settings.sidebar_compact = true;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(mast_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = (0..SESSIONS).map(chat_row).collect();
+                state.chats_synced = true;
+            });
+            shell
+        }))
+    });
+    let shell = host.read_with(vcx, |host, _| host.0.clone());
+    for _ in 0..3 {
+        shell.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..REDRAWS {
+        shell.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+    eprintln!(
+        "BENCH sidebar | {SESSIONS} sessions | ms_per_redraw={:.2}",
+        started.elapsed().as_secs_f64() * 1000.0 / f64::from(REDRAWS)
     );
 }

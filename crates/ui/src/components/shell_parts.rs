@@ -823,7 +823,7 @@ pub(crate) fn horizon_sidebar_chat_row(
     chat_id: &str,
     identity: gpui::Hsla,
     title: SharedString,
-    _status: crate::status_style::Status,
+    status: crate::status_style::Status,
     status_label: &'static str,
     selected: bool,
     searching: bool,
@@ -934,7 +934,7 @@ pub(crate) fn horizon_sidebar_chat_row(
                     .flex_none()
                     .size(px(8.0))
                     .rounded_full()
-                    .bg(if selected { foreground } else { identity }),
+                    .bg(crate::status_style::dot_color(status, theme)),
             )
             .child(div().flex_1().min_w_0().truncate().child(title))
             .children(account.map(|label| {
@@ -969,11 +969,7 @@ pub(crate) fn sidebar_status_glyph(
 ) -> AnyElement {
     if theme.ui_style.status_indicator == crate::ui_style::StatusIndicator::Dot {
         crate::status_style::indicator_for_theme(
-            if working {
-                crate::status_style::Status::Working
-            } else {
-                crate::status_style::Status::Idle
-            },
+            status,
             theme,
         )
         .into_any_element()

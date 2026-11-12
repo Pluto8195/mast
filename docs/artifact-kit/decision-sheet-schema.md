@@ -22,3 +22,15 @@ calendar date (`YYYY-MM-DD`). Model fields, endpoint lines and callers, flow ste
 
 Field markers are `+`, `~`, `−`, or empty; endpoint markers are `+`, `−`, or empty. Nullable
 `default`, `constraint`, and `image` are strings or null.
+
+
+Each top-level decision row may set `optional: true` (default `false`). Use it only when the
+change can be omitted without leaving the plan incomplete. Only optional rows offer **Don't do
+this**. Non-optional rows offer **Accept** and **Answer differently**.
+
+For planners reading `artifact_get_decisions`: `outcome: decided` with
+`overrideRecommendation: false` accepts the recommendation; its note is supplemental. With
+`overrideRecommendation: true`, `answer` contains the user's required decision text, also stored
+as the note; follow that answer instead of the recommendation. `outcome: rejected` means the
+optional change in that row will not be built; its note is optional context. Preserve row IDs
+and apply these decisions when revising the plan.

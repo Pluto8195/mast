@@ -666,3 +666,17 @@ fn chat_rows_use_shared_status_styles() {
         assert_eq!(text.spans.first().unwrap().tone, Tone::Status(status));
     }
 }
+
+#[gpui::test]
+fn menu_bar_usage_only_and_needs_you_opt_in(_cx: &mut gpui::TestAppContext) {
+    let snapshot = snapshot(&[input("waiting", RunState::Awaiting, 2, None), input("running", RunState::Working, 1, None)]);
+    let input = MenuInput { snapshot: &snapshot, interrupted: None, usage: UsageView::Accounts(&[]), pending: None, light: AppLight::Input, now: now() };
+    let default = build_usage_menu(&input, false, &Utc);
+    let labels = texts(&default);
+    assert_eq!(labels, ["Mast", "Usage", "no accounts signed in", "---", "Open Mast"]);
+    assert_eq!(default.glyph.light, AppLight::Idle);
+    let opted_in = texts(&build_usage_menu(&input, true, &Utc));
+    assert!(opted_in.iter().any(|s| s.starts_with("Needs you")));
+    assert!(opted_in.iter().any(|s| s.contains("chat waiting")));
+    assert!(!opted_in.iter().any(|s| s.contains("chat running")));
+}

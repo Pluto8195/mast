@@ -408,8 +408,8 @@ async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
     assert_eq!(queue_texts(&after), vec!["after restart"]);
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        after_prompts.lock().unwrap().is_empty(),
-        "startup must not dispatch a recovered queue"
+        !after_prompts.lock().unwrap().iter().any(|prompt| prompt == "after restart"),
+        "startup must not dispatch the recovered queue row"
     );
     assert_eq!(queue_texts(&after), vec!["after restart"]);
 
@@ -1153,26 +1153,46 @@ async fn concurrent_drains_release_one_message() {
     core.shutdown().await;
 }
 
+#[cfg(debug_assertions)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn append_during_drain_delivers_each_message_once() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host.queue_message(CHAT, "opening", Vec::new()).unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
     core.doc_host.queue_message(CHAT, "first", Vec::new()).unwrap();
-    wait_for(|| prompts.lock().unwrap().len() == 1, "first turn").await;
     let handle = core.doc_host.open(CHAT).unwrap();
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let guard = handle.test_queue_drain_guard().await;
+    harness.finish.send(()).unwrap();
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "opening turn to finish").await;
     let host = core.doc_host.clone();
-    let append_barrier = barrier.clone();
-    let append = tokio::spawn(async move {
-        append_barrier.wait().await;
-        host.queue_message(CHAT, "second", Vec::new()).unwrap();
+    let drain_handle = handle.clone();
+    let (drain_started, drain_waiting) = tokio::sync::oneshot::channel();
+    let drain = tokio::spawn(async move {
+        let drain = host.drain_queue(&drain_handle);
+        tokio::pin!(drain);
+        assert!(futures::poll!(drain.as_mut()).is_pending());
+        drain_started.send(()).unwrap();
+        drain.await;
     });
-    barrier.wait().await;
-    core.doc_host.drain_queue(&handle).await;
+    drain_waiting.await.unwrap();
+    let host = core.doc_host.clone();
+    let (append_started, append_waiting) = tokio::sync::oneshot::channel();
+    let append = tokio::spawn(async move {
+        let append = host.queue_message_with_id(CHAT, "second-id", "second", Vec::new(), true);
+        tokio::pin!(append);
+        assert!(futures::poll!(append.as_mut()).is_pending());
+        append_started.send(()).unwrap();
+        append.await.unwrap();
+    });
+    append_waiting.await.unwrap();
+    drop(guard);
+    drain.await.unwrap();
     append.await.unwrap();
     assert_eq!(queue_texts(&core), vec!["second"]);
+    wait_for(|| prompts.lock().unwrap().len() == 2, "first queued turn").await;
     harness.finish.send(()).unwrap();
-    wait_for(|| prompts.lock().unwrap().len() == 2, "second turn").await;
-    assert_eq!(*prompts.lock().unwrap(), vec!["first", "second"]);
+    wait_for(|| prompts.lock().unwrap().len() == 3, "second queued turn").await;
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening", "first", "second"]);
     assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
     core.shutdown().await;

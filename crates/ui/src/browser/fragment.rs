@@ -164,7 +164,7 @@ pub fn escape_attr(text: &str) -> String {
     escape_text(text).replace('"', "&quot;")
 }
 
-fn base_stylesheet(theme: &FragmentTheme, reduced_motion: bool) -> String {
+pub(crate) fn base_stylesheet(theme: &FragmentTheme, reduced_motion: bool) -> String {
     let mut out = String::from(":root {\n");
     out.push_str(if theme.dark {
         "  color-scheme: dark;\n"
@@ -326,7 +326,7 @@ fn bridge_script(dark: bool, reduced_motion: bool) -> String {
 }
 
 /// Tabs, `[data-tooltip]` and Lucide placeholders, run after the fragment.
-const RUNTIME_SCRIPT: &str = r#"(() => {
+pub(crate) const RUNTIME_SCRIPT: &str = r#"(() => {
   document.addEventListener("click", (event) => {
     const tab = event.target instanceof Element ? event.target.closest('[role="tab"]') : null;
     if (!tab || tab.disabled || tab.getAttribute("aria-disabled") === "true") return;

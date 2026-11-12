@@ -59,7 +59,7 @@ impl Shell {
             (None, Some(reason)) => menu_bar::UsageView::Failed(reason),
             (None, None) => menu_bar::UsageView::Loading,
         };
-        let mut view = menu_bar::build_menu(
+        let mut view = menu_bar::build_usage_menu(
             &MenuInput {
                 snapshot: &snapshot,
                 interrupted: interrupted.as_ref(),
@@ -68,8 +68,10 @@ impl Shell {
                 light,
                 now: utc_now,
             },
+            self.settings.menu_bar_needs_you,
             &chrono::Local,
         );
+        if self.settings.menu_bar_needs_you {
         let requests = {
             let state = self.state.read(cx);
             let mut requests = Vec::new();
@@ -101,6 +103,7 @@ impl Shell {
             requests
         };
         menu_bar::insert_requests(&mut view, requests, utc_now);
+        }
         if self.menu_bar.last.as_ref() != Some(&view) {
             menu_bar::apply(Some(&view));
             self.menu_bar.last = Some(view);

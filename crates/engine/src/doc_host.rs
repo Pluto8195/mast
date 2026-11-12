@@ -768,6 +768,12 @@ pub struct ChatDocHandle {
 }
 
 impl ChatDocHandle {
+    /// Hold the queue drain for deterministic integration tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn test_queue_drain_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.drain_lock.lock().await
+    }
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -1678,7 +1684,7 @@ impl DocHost {
         }));
         // The mirror starts dirty and empty; watch_messages materializes it
         // once on attach instead of maintaining an unwatched transcript.
-        let initial_queue = doc.read_queue().unwrap_or_default();
+        let initial_queue = doc.read_queue()?;
         // A queue already present when a handle is materialized came from a
         // persisted snapshot (or a synced checkpoint), not from a prompt the
         // user submitted to this live engine. Keep that recovered work frozen
@@ -3694,16 +3700,24 @@ impl DocHost {
         let Some(message_id) = turns.pending_message(chat_id) else {
             return;
         };
-        let Ok(handle) = self.open(chat_id) else {
-            return;
+        let handle = match self.open(chat_id) {
+            Ok(handle) => handle,
+            Err(error) => {
+                tracing::warn!(chat = %chat_id, %error, "opening queue to pull pending wake failed");
+                return;
+            }
         };
-        if matches!(handle.doc.take_queued(&message_id), Ok(Some(_))) {
-            turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
-            handle.publish_queue();
-            turns.cancel_pending(chat_id);
-        } else {
-            // The drain already took it: it is a turn now (or about to be).
-            turns.mark_dispatched(chat_id);
+        match handle.doc.take_queued(&message_id) {
+            Ok(Some(_)) => {
+                turns.note_retired(chat_id, &message_id, handle.persistence.as_ref());
+                handle.publish_queue();
+                turns.cancel_pending(chat_id);
+            }
+            Ok(None) => {
+                // The drain already took it: it is a turn now (or about to be).
+                turns.mark_dispatched(chat_id);
+            }
+            Err(error) => tracing::warn!(chat = %chat_id, %error, "pulling pending wake from queue failed"),
         }
     }
 
@@ -3766,8 +3780,15 @@ impl DocHost {
             return;
         }
         loop {
-            let Ok(Some(head)) = handle.doc.read_queue().map(|q| q.into_iter().next()) else {
-                return;
+            let head = match handle.doc.read_queue() {
+                Ok(rows) => match rows.into_iter().next() {
+                    Some(head) => head,
+                    None => return,
+                },
+                Err(error) => {
+                    tracing::warn!(chat = %handle.chat_id, %error, "reading queue for drain failed");
+                    return;
+                }
             };
             match &head.delivery_gate {
                 Some(QueueDeliveryGate::Editing {
@@ -3783,7 +3804,10 @@ impl DocHost {
                         since_ms: now_ms(),
                         base_text_hash: base_text_hash.clone(),
                     };
-                    let _ = handle.doc.set_queued_delivery_gate(&head.id, Some(&review));
+                    if let Err(error) = handle.doc.set_queued_delivery_gate(&head.id, Some(&review)) {
+                        tracing::warn!(chat = %handle.chat_id, %error, "setting queue review gate failed");
+                        return;
+                    }
                     handle.publish_queue();
                     self.save_snapshot(handle);
                     return;
@@ -3815,8 +3839,13 @@ impl DocHost {
             let confirmed = handle.doc.queued_context_reset_confirmed(&head.id);
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
-            let Ok(Some(item)) = handle.doc.take_queued(&head.id) else {
-                return;
+            let item = match handle.doc.take_queued(&head.id) {
+                Ok(Some(item)) => item,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(chat = %handle.chat_id, %error, "taking queue head failed");
+                    return;
+                }
             };
             handle.publish_queue();
             if let Err(err) = self
@@ -6143,6 +6172,31 @@ mod tool_blob_cache_tests {
                 edge: None,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn queue_append_waits_for_drain_to_remove_the_previous_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()));
+        host.queue_message("chat-queue-race", "first", Vec::new()).unwrap();
+        let handle = host.open("chat-queue-race").unwrap();
+        let first = handle.doc.read_queue().unwrap()[0].id.clone();
+        let drain = handle.drain_lock.lock().await;
+        let other = host.clone();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let append = tokio::spawn(async move {
+            started.send(()).unwrap();
+            other.queue_message_with_id("chat-queue-race", "second", "second", Vec::new(), true).await
+        });
+        waiting.await.unwrap();
+        assert!(!append.is_finished());
+        assert_eq!(handle.doc.take_queued(&first).unwrap().unwrap().text, "first");
+        drop(drain);
+        append.await.unwrap().unwrap();
+        let rows = handle.doc.read_queue().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "second");
+        assert_eq!(handle.doc.take_queued("second").unwrap().unwrap().text, "second");
     }
 
     #[tokio::test]

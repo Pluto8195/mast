@@ -165,6 +165,7 @@ impl CompareView {
 fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
     match kind {
         ArtifactKind::DecisionSheet => Some(WebKind::DecisionSheet),
+        ArtifactKind::Plan => Some(WebKind::Plan),
         ArtifactKind::HtmlFragment | ArtifactKind::Options => Some(WebKind::Fragment),
         ArtifactKind::HtmlPage => Some(WebKind::Page),
         ArtifactKind::Mermaid => Some(WebKind::Mermaid),
@@ -175,6 +176,10 @@ fn web_kind(kind: ArtifactKind) -> Option<WebKind> {
 
 /// What the web wrapper is given for a side (the text, or an image's base64).
 fn web_source(side: &SideContent, kind: ArtifactKind) -> (String, String) {
+    if kind == ArtifactKind::Plan {
+        let html = side.text.as_deref().and_then(|s| mast_proto::plan::Plan::parse(s).ok()).map(|p| mast_proto::plan_render::render(&p)).unwrap_or_default();
+        return (html, "text/html".to_owned());
+    }
     if kind == ArtifactKind::DecisionSheet {
         let html = side
             .text

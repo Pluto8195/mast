@@ -192,27 +192,17 @@ Code: `crates/proto/src/artifacts/questions.rs`, `crates/engine/src/artifact_que
   the agent folds the answer in with `status: resolved` + `decision:`. This replaces the design
   doc's "Zeron writes the answer into the artifact" (no write races with the watcher, no
   surprise diffs).
-- **Required Actions.** The engine (`ArtifactQuestionSync`, every 2 s on the artifact's owning
-  device, and immediately after `ArtifactAnswerQuestion`) reconciles pinned plans (or
-  `role: plan`) that belong to a work item:
-  - blocking open question → its own request, dedupe key `artq:<artifactId>:<Q-n>`, text
-    `Q-n: <question>`, info = plan title/revision, `Blocks:` and the artifact link;
-  - every other open question → one request, key `artq:<artifactId>:rollup`, text `N open
-    question(s) in <title>`, info lists `Q-n: text` per line. Requests cannot be edited, so a
-    changed list resolves the old request (system actor, note "Superseded: …") and raises a new
-    one;
-  - dedupe is by key across revisions; operation ids derive from (artifact, question, revision),
-    so republishing never duplicates. A question removed, resolved in the document, answered, or
-    no longer blocking resolves its request (system actor, note says why);
-  - origin: the Chat that published the latest revision (else the artifact's first publisher)
-    when live and in the Space, so Reply & resolve reaches it; otherwise a system-origin request.
-- **Resolution both ways.** Card answer → `ArtifactAnswerQuestion {artifactId, questionId,
-  answer}` (local registry write, not forwardable; the UI also sends `Re: "Q-n: text": answer` to
-  the publishing Chat) → the next reconcile resolves the request ("Answered in Mast: …"). A
-  request resolved by a person (Resolve, or Reply & resolve) records an answer: the note, else
-  "Resolved in Required Actions". The roll-up answers every question its info lists. A resolution
-  by the system actor never counts as an answer. Plain Resolve does not message the Chat; only
-  Reply & resolve (existing behaviour) and the card do.
+- **Required Actions.** The engine reconciles pinned plans (or `role: plan`) on the owning
+  device. A single `artplan:<artifactId>` request lists all open questions, including blocking
+  ones. Republishing updates its text, revision, details and origin in place. The current
+  publisher receives Reply & resolve; a free-text reply is not attributed to any question.
+  Existing `artq:<artifactId>:<Q-n>` and roll-up requests remain usable, and their resolutions
+  still record the answers they represented; new per-question requests are not created.
+  A resolved plan request is recreated when a later revision opens a question.
+- **Answers.** `ArtifactAnswerQuestion` and `ArtifactAnswerQuestions` record answers on the
+  artifact; `artifact_get_plan` returns them in `answeredQuestions`. Markdown and HTML plans
+  support the existing question-answer controls. Structured plans list questions linked to
+  decision-sheet rows, which are answered in the sheet.
 - **Agents.** `artifact_get_plan` adds `answeredQuestions: [{id, answer, at, revision}]`.
   Conventions: answers arrive as `Re: "Q-n: …": <answer>` messages.
 - **Drift (C).** `ArtifactDrift {artifactId, targetDeviceId?}` → `{artifactId, commitsSince,

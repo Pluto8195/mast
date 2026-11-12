@@ -1,0 +1,388 @@
+{
+  "kind": "plan",
+  "title": "Order history improvements",
+  "summary": "Show customers an accurate order history.",
+  "sheet": {
+    "ref": "mast-artifact:example",
+    "rev": 1
+  },
+  "scope": {
+    "constraints": [
+      "Keep existing permissions"
+    ],
+    "in": [
+      "Show order events"
+    ],
+    "out": [
+      {
+        "item": "Export",
+        "livesIn": "later"
+      }
+    ],
+    "optional": [
+      {
+        "item": "Filter by date",
+        "question": "Q-1"
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "claim": "Orders have an event history.",
+      "cite": {
+        "path": "app/orders/views.py",
+        "line": 120
+      },
+      "status": "measured",
+      "section": "current"
+    },
+    {
+      "id": "F-2",
+      "claim": "Customers may want filters.",
+      "cite": null,
+      "status": "unverified",
+      "section": "evidence"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-1",
+      "title": "Show events",
+      "text": "Display events in order.",
+      "rows": [
+        "event-order"
+      ],
+      "origin": "sheet"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "T1",
+      "title": "Order history improvement 1 with a descriptive title",
+      "goal": "Improve order history step 1.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": {
+        "ref": "events",
+        "role": "produces"
+      },
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [],
+      "status": {
+        "state": "buildable",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T2",
+      "title": "Order history improvement 2 with a descriptive title",
+      "goal": "Improve order history step 2.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": {
+        "ref": "events",
+        "role": "consumes"
+      },
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [
+        {
+          "id": "T1",
+          "mode": "build"
+        }
+      ],
+      "status": {
+        "state": "blocked-by-tickets",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T3",
+      "title": "Order history improvement 3 with a descriptive title",
+      "goal": "Improve order history step 3.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": null,
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [
+        {
+          "id": "T2",
+          "mode": "build"
+        }
+      ],
+      "status": {
+        "state": "blocked-by-tickets",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T4",
+      "title": "Order history improvement 4 with a descriptive title",
+      "goal": "Improve order history step 4.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": null,
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [],
+      "status": {
+        "state": "blocked-by-questions",
+        "questions": [
+          "Q-1"
+        ]
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T5",
+      "title": "Order history improvement 5 with a descriptive title",
+      "goal": "Improve order history step 5.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": null,
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [],
+      "status": {
+        "state": "buildable",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T6",
+      "title": "Order history improvement 6 with a descriptive title",
+      "goal": "Improve order history step 6.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": null,
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [
+        {
+          "id": "T5",
+          "mode": "build"
+        }
+      ],
+      "status": {
+        "state": "blocked-by-tickets",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    },
+    {
+      "id": "T7",
+      "title": "Order history improvement 7 with a descriptive title",
+      "goal": "Improve order history step 7.",
+      "behavior": [
+        {
+          "text": "Show the agreed behavior.",
+          "row": "event-order"
+        }
+      ],
+      "acceptance": [
+        "The behavior works."
+      ],
+      "outOfScope": [],
+      "contract": null,
+      "where": [
+        {
+          "path": "app/orders/views.py",
+          "line": 120,
+          "status": "measured"
+        }
+      ],
+      "dependsOn": [],
+      "status": {
+        "state": "buildable",
+        "questions": []
+      },
+      "size": {
+        "label": "M",
+        "lines": [
+          100,
+          200
+        ]
+      },
+      "linear": null
+    }
+  ],
+  "contracts": [
+    {
+      "id": "events",
+      "name": "Events",
+      "summary": "A list of events.",
+      "producedBy": [
+        "T1"
+      ],
+      "consumedBy": [
+        "T2"
+      ],
+      "example": "{\"events\": [\"created\"]}"
+    }
+  ],
+  "questions": [
+    {
+      "id": "Q-1",
+      "text": "Should filters be included?",
+      "row": "filter",
+      "blocking": true,
+      "blocks": [
+        "T4"
+      ],
+      "example": "Filter by date"
+    }
+  ],
+  "blastRadius": [
+    {
+      "surface": "Orders",
+      "kind": "page",
+      "audience": "Customers",
+      "change": "Show events",
+      "gate": "Existing access"
+    }
+  ],
+  "verification": [
+    {
+      "ticket": "T1",
+      "text": "Check events are ordered."
+    },
+    {
+      "ticket": null,
+      "text": "Check accessibility."
+    }
+  ],
+  "superseded": [
+    {
+      "item": "Old mockup",
+      "reason": "Replaced by this plan",
+      "date": "2026-01-01"
+    }
+  ]
+}

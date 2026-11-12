@@ -738,11 +738,16 @@ enum KeyRoute {
     /// Forwarded to GPUI: a fixed browser combo, an app shortcut, or an
     /// owner-requested extra key with a Cmd/Ctrl modifier.
     App,
-    /// An owner-requested extra key without Cmd/Ctrl (⌥↑/⌥↓, Esc with the
-    /// find bar open): GPUI gets it unless a text field in the page has
-    /// focus, where those keys belong to the field.
+    /// A shortcut or owner-requested extra key a text field also uses: any
+    /// key without Cmd/Ctrl (⌥↑/⌥↓, Esc with the find bar open, single-key
+    /// shortcuts like `e`) and the editing combos ⌘A/⌘C/⌘V/⌘X/⌘Z. GPUI gets
+    /// it unless a text field in the page has focus, where it belongs to the
+    /// field.
     AppUnlessPageField,
 }
+
+/// Cmd combos a focused text field needs for itself.
+const FIELD_EDIT_KEYS: &[&str] = &["cmd-a", "cmd-c", "cmd-v", "cmd-x", "cmd-z", "cmd-shift-z"];
 
 fn key_route(
     combo: &str,
@@ -751,10 +756,12 @@ fn key_route(
     extra: &[String],
 ) -> KeyRoute {
     let matches = |s: &String| gpui::Keystroke::parse(s).is_ok_and(|s| s == *keystroke);
-    if BROWSER_KEYS.contains(&combo) || shortcuts.iter().any(matches) {
+    if BROWSER_KEYS.contains(&combo) {
         KeyRoute::App
-    } else if extra.iter().any(matches) {
-        if combo.starts_with("cmd-") || combo.contains("-cmd-") || combo.starts_with("ctrl-") {
+    } else if shortcuts.iter().any(matches) || extra.iter().any(matches) {
+        let command =
+            combo.starts_with("cmd-") || combo.contains("-cmd-") || combo.starts_with("ctrl-");
+        if command && !FIELD_EDIT_KEYS.contains(&combo) {
             KeyRoute::App
         } else {
             KeyRoute::AppUnlessPageField
@@ -778,6 +785,7 @@ fn is_forwarded_key(
 /// Whether the focused element of the page (looking through same-origin
 /// frames) takes typed text. Resolves to "1" or "0".
 const EDITABLE_FOCUS_SCRIPT: &str = r#"(function () {
+  if (document.activeElement && document.activeElement.tagName === "IFRAME" && window.__mastEditFocus === true) return "1";
   let doc = document, el = doc.activeElement;
   for (let i = 0; i < 8 && el && el.tagName === "IFRAME"; i++) {
     try { doc = el.contentDocument; el = doc && doc.activeElement; } catch (_) { return "0"; }
@@ -1223,6 +1231,30 @@ mod forwarded_key_tests {
         // Anything unlisted stays with the page.
         assert_eq!(route("escape", &[], &[]), KeyRoute::Page);
         assert_eq!(route("up", &[], &extra), KeyRoute::Page);
+    }
+
+    #[test]
+    fn single_key_shortcuts_and_edit_combos_defer_to_a_focused_page_field() {
+        let shortcuts: Vec<String> =
+            ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v", "cmd-shift-p"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        for combo in ["e", "n", "p", "t", "v", "backspace", "cmd-a", "cmd-c", "cmd-v"] {
+            let key = gpui::Keystroke::parse(combo).unwrap();
+            assert_eq!(
+                key_route(combo, &key, &shortcuts, &[]),
+                KeyRoute::AppUnlessPageField,
+                "{combo}"
+            );
+        }
+        // App commands still reach Mast while a field has focus.
+        for combo in ["cmd-shift-p", "cmd-w", "cmd-k"] {
+            let key = gpui::Keystroke::parse(combo).unwrap();
+            assert_eq!(key_route(combo, &key, &shortcuts, &[]), KeyRoute::App, "{combo}");
+        }
+        // The cross-origin artifact frame reports its own edit focus.
+        assert!(super::EDITABLE_FOCUS_SCRIPT.contains("window.__mastEditFocus === true"));
     }
 
     #[test]

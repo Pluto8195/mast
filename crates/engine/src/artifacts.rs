@@ -427,6 +427,30 @@ struct PublishArgs {
     idempotency_key: Option<String>,
 }
 
+fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+        if let Some(kind) = serde_json::from_slice::<Value>(bytes).ok()
+            .and_then(|value| value.get("kind").and_then(Value::as_str).and_then(ArtifactKind::parse))
+            .filter(|kind| matches!(kind, ArtifactKind::DecisionSheet | ArtifactKind::Plan | ArtifactKind::Options))
+        {
+            return kind;
+        }
+    }
+    ArtifactKind::from_path(&path.to_string_lossy())
+}
+
+fn extract_plan_questions(kind: ArtifactKind, source: &str) -> Vec<mast_proto::PlanQuestion> {
+    if kind != ArtifactKind::Plan {
+        return mast_proto::extract_questions(kind, source);
+    }
+    mast_proto::plan::Plan::parse(source).ok().and_then(|plan| plan.questions).unwrap_or_default()
+        .into_iter().map(|question| mast_proto::PlanQuestion {
+            id: question.id.to_ascii_uppercase(), text: question.text, blocking: question.blocking,
+            status: mast_proto::PlanQuestionStatus::Open,
+            blocks: (!question.blocks.is_empty()).then(|| question.blocks.join(", ")),
+        }).collect()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderCheckArgs {
@@ -950,6 +974,29 @@ impl ArtifactsService {
             mast_proto::decision_sheet::DecisionSheet::parse(std::str::from_utf8(&bytes).expect("validated UTF-8"))
                 .map_err(|e| ArtifactError::invalid(format!("invalid decision sheet: {e}")))?;
         }
+        if kind == ArtifactKind::Plan {
+            let plan = mast_proto::plan::Plan::parse(std::str::from_utf8(&bytes).expect("validated UTF-8"))
+                .map_err(|e| ArtifactError::invalid(format!("invalid plan: {e}")))?;
+            if let Some(sheet_ref) = plan.sheet.as_ref() {
+                let id = sheet_ref.r#ref.strip_prefix("mast-artifact:").unwrap_or("");
+                if let Some(sheet_artifact) = self.workspace().artifact(id)
+                    && sheet_artifact.space_id == space.id
+                    && sheet_artifact.kind == ArtifactKind::DecisionSheet
+                    && sheet_artifact.current_revision as u64 == sheet_ref.rev
+                    && sheet_artifact.archived_at.is_none()
+                    && match (&request.work_item_id, sheet_artifact.plan_scope()) {
+                        (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs,
+                        (None, Some(PlanScope::Chat(chat))) => request.chat_id.as_deref() == Some(chat),
+                        _ => false,
+                    }
+                    && let Ok(sheet_bytes) = self.current_bytes(&sheet_artifact)
+                    && let Ok(sheet_text) = std::str::from_utf8(&sheet_bytes)
+                    && let Ok(mut sheet) = mast_proto::decision_sheet::DecisionSheet::parse(sheet_text) {
+                        sheet.apply_decisions(&sheet_artifact.decisions);
+                        plan.validate_sheet(&sheet).map_err(ArtifactError::invalid)?;
+                    }
+            }
+        }
         let manifest = if kind == ArtifactKind::Options {
             Some(OptionsManifest::parse(&String::from_utf8_lossy(&bytes))?)
         } else {
@@ -1374,7 +1421,7 @@ impl ArtifactsService {
 
     /// The current text of an artifact (stored file, else the current
     /// snapshot).
-    fn current_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
+    pub(crate) fn current_bytes(&self, artifact: &ArtifactView) -> Outcome<Vec<u8>> {
         read_file(Path::new(&artifact.stored_path)).or_else(|error| {
             let current = artifact.current().ok_or(error)?;
             std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
@@ -1437,6 +1484,32 @@ impl ArtifactsService {
         let Some(current) = artifact.current() else {
             return Vec::new();
         };
+        // Structured plan questions refer to sheet rows. Their state can
+        // change without a plan revision, so do not use the plan-hash cache.
+        if artifact.kind == ArtifactKind::Plan {
+            let bytes = std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
+                .ok().or_else(|| self.current_bytes(artifact).ok()).unwrap_or_default();
+            let source = String::from_utf8_lossy(&bytes);
+            let mut questions = extract_plan_questions(artifact.kind, &source);
+            if let Ok(plan) = mast_proto::plan::Plan::parse(&source)
+                && let Some(reference) = plan.sheet.as_ref().and_then(|sheet| mast_proto::artifacts::strip_artifact_scheme(&sheet.r#ref))
+                && let Some(sheet) = self.workspace().artifact(reference)
+                && sheet.space_id == artifact.space_id && sheet.work_item_id == artifact.work_item_id
+                && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none()
+                && let Ok(bytes) = self.current_bytes(&sheet)
+                && let Ok(text) = std::str::from_utf8(&bytes)
+                && let Ok(document) = mast_proto::decision_sheet::DecisionSheet::parse(text) {
+                let rows = document.decision_rows();
+                for (question, source) in questions.iter_mut().zip(plan.questions.unwrap_or_default()) {
+                    if rows.iter().find(|row| row.id == source.row).is_some_and(|row| {
+                        row.status.state != "open" || sheet.decisions.iter().any(|decision| decision.row_id == row.id && decision.revision == sheet.current_revision)
+                    }) {
+                        question.status = mast_proto::PlanQuestionStatus::Resolved;
+                    }
+                }
+            }
+            return questions;
+        }
         if let Some((hash, questions)) = lock(&self.inner.questions).get(&artifact.id)
             && *hash == current.hash
         {
@@ -1446,13 +1519,66 @@ impl ArtifactsService {
             .ok()
             .or_else(|| self.current_bytes(artifact).ok())
             .unwrap_or_default();
-        let questions =
-            mast_proto::extract_questions(artifact.kind, &String::from_utf8_lossy(&bytes));
+        let questions = extract_plan_questions(artifact.kind, &String::from_utf8_lossy(&bytes));
         lock(&self.inner.questions).insert(
             artifact.id.clone(),
             (current.hash.clone(), questions.clone()),
         );
         questions
+    }
+
+    pub(crate) fn plan_questions_at_revision(&self, artifact: &ArtifactView, revision: u32) -> Option<Vec<mast_proto::PlanQuestion>> {
+        let revision = artifact.revisions.iter().find(|entry| entry.id == revision)?;
+        let bytes = std::fs::read(self.snapshot_path(&artifact.id, &revision.hash)).ok()?;
+        Some(extract_plan_questions(artifact.kind, &String::from_utf8_lossy(&bytes)))
+    }
+
+    pub(crate) fn plan_sheet_revision(&self, artifact: &ArtifactView) -> Option<u32> {
+        if artifact.kind != ArtifactKind::Plan { return None; }
+        let bytes = self.current_bytes(artifact).ok()?;
+        let plan = mast_proto::plan::Plan::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+        let reference = plan.sheet?.r#ref;
+        let id = mast_proto::artifacts::strip_artifact_scheme(&reference)?;
+        let sheet = self.workspace().artifact(id)?;
+        (sheet.space_id == artifact.space_id && sheet.work_item_id == artifact.work_item_id
+            && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none()).then_some(sheet.current_revision)
+    }
+
+    /// Start of the current uninterrupted open interval for a question.
+    pub(crate) fn question_opened_at(&self, artifact: &ArtifactView, id: &str) -> (u32, i64) {
+        let mut start = (artifact.current_revision, artifact.current().map_or(artifact.created_at, |revision| revision.at));
+        let mut boundary = false;
+        for revision in &artifact.revisions {
+            let Some(questions) = self.plan_questions_at_revision(artifact, revision.id) else { return (1, artifact.created_at); };
+            if !questions.iter().any(|question| question.id.eq_ignore_ascii_case(id)
+                && question.status == mast_proto::PlanQuestionStatus::Open) { boundary = true; break; }
+            start = (revision.id, revision.at);
+        }
+        if !boundary && artifact.revisions.last().is_none_or(|revision| revision.id > 1) {
+            return (1, artifact.created_at);
+        }
+        start
+    }
+
+    pub(crate) fn current_plan_answers(&self, artifact: &ArtifactView) -> Vec<mast_proto::ArtifactQuestionAnswer> {
+        let mut starts: std::collections::HashMap<String, u32> = artifact.answers.iter()
+            .map(|answer| (answer.id.to_ascii_uppercase(), artifact.current_revision)).collect();
+        let mut pending: std::collections::HashSet<String> = starts.keys().cloned().collect();
+        let mut incomplete = artifact.revisions.is_empty();
+        for revision in &artifact.revisions {
+            if pending.is_empty() { break; }
+            let Some(questions) = self.plan_questions_at_revision(artifact, revision.id) else { incomplete = true; break; };
+            pending.retain(|id| {
+                if questions.iter().any(|q| q.id.eq_ignore_ascii_case(id) && q.status == mast_proto::PlanQuestionStatus::Open) {
+                    starts.insert(id.clone(), revision.id);
+                    true
+                } else { false }
+            });
+        }
+        if incomplete || artifact.revisions.last().is_some_and(|revision| revision.id > 1) {
+            for id in &pending { starts.insert(id.clone(), 1); }
+        }
+        artifact.answers.iter().filter(|answer| answer.revision >= starts[&answer.id.to_ascii_uppercase()]).cloned().collect()
     }
 
     /// `ArtifactDrift`: commits made after the artifact's latest revision on
@@ -1546,6 +1672,142 @@ impl ArtifactsService {
         Ok(mast_proto::ArtifactAnswerQuestionReply {
             artifact_id: artifact.id,
             question_id: id,
+        })
+    }
+
+    /// Record a validated batch of plan answers in one registry operation.
+    pub fn answer_questions(
+        &self,
+        params: &mast_proto::artifacts::ArtifactAnswerQuestionsParams,
+        by: WorkOutlineActor,
+    ) -> Outcome<mast_proto::artifacts::ArtifactAnswerQuestionsReply> {
+        use mast_proto::artifacts::{ArtifactQuestionAnswer, PlanQuestionStatus, ArtifactAnswerQuestionsReply};
+        use std::collections::HashSet;
+        let _gate = lock(&self.inner.gate);
+        let artifact = self.workspace().artifact(&params.artifact_id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        if artifact.archived_at.is_some() || artifact.current_revision != params.revision {
+            return Err(ArtifactError::invalid("plan revision changed; review the current plan"));
+        }
+        if params.answers.is_empty() { return Err(ArtifactError::invalid("answer batch is empty")); }
+        let questions = self.plan_questions(&artifact);
+        let mut ids = HashSet::new();
+        let mut sent = Vec::new();
+        let at = now_ms();
+        for draft in &params.answers {
+            let id = draft.question_id.trim().to_ascii_uppercase();
+            if !ids.insert(id.clone()) || !questions.iter().any(|question| question.id == id && question.status == PlanQuestionStatus::Open) {
+                return Err(ArtifactError::invalid(format!("question {id:?} is not open or is repeated")));
+            }
+            let answer = clean_answer(&draft.answer);
+            if answer.is_empty() { return Err(ArtifactError::invalid("answer must not be empty")); }
+            sent.push(ArtifactQuestionAnswer { id, answer, at, revision: params.revision, by: by.clone() });
+        }
+        let mut answers = artifact.answers.clone();
+        answers.retain(|answer| !ids.contains(&answer.id.to_ascii_uppercase()));
+        answers.extend(sent.iter().cloned());
+        if answers.len() > mast_proto::artifacts::MAX_ANSWERS { return Err(ArtifactError::invalid("too many recorded answers")); }
+        let saved = self.workspace().set_artifact_answers_exact(&artifact.id, &answers)
+            .map_err(|error| ArtifactError::invalid(format!("could not save answers: {error}")))?;
+        if !saved { return Err(ArtifactError::not_found("artifact no longer exists")); }
+        Ok(ArtifactAnswerQuestionsReply { artifact_id: artifact.id, answers: sent })
+    }
+
+    /// Validate and commit a complete batch in one registry operation.
+    pub fn submit_sheet_decisions(
+        &self,
+        params: &mast_proto::decision_sheet::SubmitSheetDecisionsParams,
+    ) -> Outcome<mast_proto::decision_sheet::SubmitSheetDecisionsReply> {
+        use mast_proto::decision_sheet::{DecisionSheet, SheetDecision, SubmitSheetDecisionsReply};
+        use std::collections::HashSet;
+        let _gate = lock(&self.inner.gate);
+        let artifact = self
+            .workspace()
+            .artifact(&params.artifact_id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        if artifact.kind != ArtifactKind::DecisionSheet || artifact.archived_at.is_some() {
+            return Err(ArtifactError::invalid(
+                "artifact is not an active decision sheet",
+            ));
+        }
+        if artifact.current_revision != params.revision {
+            return Err(ArtifactError::invalid(
+                "sheet revision changed; review the current sheet",
+            ));
+        }
+        if params.decisions.is_empty() {
+            return Err(ArtifactError::invalid("decision batch is empty"));
+        }
+        let bytes = self.current_bytes(&artifact)?;
+        let source = std::str::from_utf8(&bytes)
+            .map_err(|_| ArtifactError::invalid("sheet is not UTF-8"))?;
+        let sheet = DecisionSheet::parse(source).map_err(ArtifactError::invalid)?;
+        let rows = sheet.decision_rows();
+        let mut seen = HashSet::new();
+        for decision in &params.decisions {
+            let row = rows
+                .iter()
+                .find(|row| row.id == decision.row_id)
+                .ok_or_else(|| {
+                    ArtifactError::invalid(format!("unknown row {:?}", decision.row_id))
+                })?;
+            if row.status.state != "open"
+                || artifact.decisions.iter().any(|saved| saved.row_id == decision.row_id && saved.revision == artifact.current_revision)
+                || !seen.insert(&decision.row_id)
+            {
+                return Err(ArtifactError::invalid(format!(
+                    "row {:?} is not open or is repeated",
+                    decision.row_id
+                )));
+            }
+            if decision.outcome == mast_proto::decision_sheet::DecisionOutcome::Rejected && !row.optional {
+                return Err(ArtifactError::invalid("row is not optional"));
+            }
+            if decision.override_recommendation && (decision.outcome != mast_proto::decision_sheet::DecisionOutcome::Decided || decision.note.as_deref().is_none_or(|s| s.trim().is_empty())) {
+                return Err(ArtifactError::invalid("an override requires an answer"));
+            }
+            if decision
+                .note
+                .as_ref()
+                .is_some_and(|note| note.chars().count() > 600)
+            {
+                return Err(ArtifactError::invalid(
+                    "decision note exceeds 600 characters",
+                ));
+            }
+        }
+        let at = now_ms();
+        let sent: Vec<SheetDecision> = params
+            .decisions
+            .iter()
+            .map(|draft| SheetDecision {
+                row_id: draft.row_id.clone(),
+                outcome: draft.outcome,
+                override_recommendation: draft.override_recommendation,
+                note: draft
+                    .note
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|note| !note.is_empty())
+                    .map(str::to_owned),
+                at,
+                revision: params.revision,
+            })
+            .collect();
+        let mut decisions = artifact.decisions.clone();
+        decisions.retain(|decision| !seen.contains(&decision.row_id));
+        decisions.extend(sent.iter().cloned());
+        let saved = self.workspace()
+            .set_artifact_decisions(&artifact.id, &decisions)
+            .map_err(|error| {
+                ArtifactError::invalid(format!("could not save decisions: {error}"))
+            })?;
+        if !saved {
+            return Err(ArtifactError::not_found("artifact no longer exists"));
+        }
+        Ok(SubmitSheetDecisionsReply {
+            artifact_id: artifact.id,
+            decisions: sent,
         })
     }
 
@@ -2381,7 +2643,7 @@ impl ArtifactsService {
             Some(raw) => Some(ArtifactKind::parse(raw).ok_or_else(|| {
                 ArtifactError::invalid(format!(
                     "kind must be markdown, html-fragment, html-page, mermaid, image, or \
-                     options, or decision-sheet, not {raw:?}"
+                     options, decision-sheet, or plan, not {raw:?}"
                 ))
             })?),
             None => None,
@@ -2407,12 +2669,36 @@ impl ArtifactsService {
                 reply.revision,
             )?;
         }
+        let orphaned_row_ids = self.workspace().artifact(&reply.artifact_id).and_then(|artifact| {
+            if artifact.kind != ArtifactKind::DecisionSheet { return None; }
+            let bytes = self.current_bytes(&artifact).ok()?;
+            let sheet = mast_proto::decision_sheet::DecisionSheet::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+            let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
+            Some(orphans.into_iter().map(|decision| decision.row_id.clone()).collect::<Vec<_>>())
+        }).unwrap_or_default();
+        let mut warnings = Vec::<String>::new();
+        if kind == Some(ArtifactKind::Plan) {
+            if let Some(artifact) = self.workspace().artifact(&reply.artifact_id)
+                && let Ok(bytes) = self.current_bytes(&artifact)
+                && let Ok(source) = std::str::from_utf8(&bytes)
+                && let Ok(plan) = mast_proto::plan::Plan::parse(source)
+                && let Some(sheet_ref) = plan.sheet {
+                let readable = sheet_ref.r#ref.strip_prefix("mast-artifact:").and_then(|id| self.workspace().artifact(id)).is_some_and(|sheet| {
+                    sheet.space_id == caller.space_id && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none() && sheet.current_revision as u64 == sheet_ref.rev
+                    && match (&caller.work_item_id, sheet.plan_scope()) { (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs, (None, Some(PlanScope::Chat(chat))) => chat == caller.chat_id, _ => false }
+                    && self.current_bytes(&sheet).ok().and_then(|b| String::from_utf8(b).ok()).and_then(|s| mast_proto::decision_sheet::DecisionSheet::parse(&s).ok()).is_some()
+                });
+                if !readable { warnings.push("Linked decision sheet revision is not readable; row references were not validated".into()); }
+            }
+        }
         Ok(json!({
+            "warnings": warnings,
             "artifactId": reply.artifact_id,
             "revision": reply.revision,
             "url": reply.url,
             "storedPath": reply.stored_path,
             "changed": reply.changed,
+            "orphanedRowIds": orphaned_row_ids,
             "note": "Link it in your message as [title](mast-artifact:<artifactId>). For visual \
                      kinds, run artifact_render_check before calling it done.",
         }))
@@ -2448,10 +2734,15 @@ impl ArtifactsService {
             None
         };
         let content = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
-        let (open_questions, unverified_claims) = content
+        let (mut open_questions, unverified_claims) = content
             .as_deref()
             .map(|text| (count_open_questions(text), count_unverified_claims(text)))
             .unwrap_or((0, 0));
+        let parsed_questions = if content.is_some() { self.plan_questions(&plan) } else { Vec::new() };
+        let current_answers = if content.is_some() { self.current_plan_answers(&plan) } else { plan.answers.clone() };
+        if plan.kind == ArtifactKind::Plan && content.is_some() {
+            open_questions = mast_proto::artifacts::open_unanswered(&parsed_questions, &current_answers).len() as u32;
+        }
         Ok(json!({
             "artifactId": plan.id,
             "title": plan.title,
@@ -2459,15 +2750,43 @@ impl ArtifactsService {
             "revision": plan.current_revision,
             "storedPath": plan.stored_path,
             "url": plan.url(),
+            "plan": if plan.kind == ArtifactKind::Plan { content.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()) } else { None },
             "content": content,
             "openQuestions": open_questions,
             "unverifiedClaims": unverified_claims,
-            "answeredQuestions": plan.answers.iter().map(|a| json!({
+            "answeredQuestions": plan.answers.iter().filter(|answer| {
+                !parsed_questions.iter().any(|q| q.id.eq_ignore_ascii_case(&answer.id) && q.status == mast_proto::PlanQuestionStatus::Open)
+                    || current_answers.iter().any(|a| a.id.eq_ignore_ascii_case(&answer.id) && a.revision == answer.revision)
+            }).map(|a| json!({
                 "id": a.id, "answer": a.answer, "at": a.at, "revision": a.revision,
             })).collect::<Vec<_>>(),
+            "decisions": plan.decisions,
             "comments": self.plan_comments(&plan, content.as_deref()),
             "pickedOptions": picked_options,
         }))
+    }
+
+    /// Read a decision sheet's sent decisions within the caller's scope.
+    pub fn agent_get_decisions(&self, caller: &AgentCaller, arguments: &Value) -> Outcome<Value> {
+        let id = arguments.get("artifactId").and_then(Value::as_str)
+            .ok_or_else(|| ArtifactError::invalid("artifactId is required"))?;
+        let artifact = self.workspace().artifact(id)
+            .ok_or_else(|| ArtifactError::not_found("artifact not found"))?;
+        let in_scope = artifact.space_id == caller.space_id && match (&caller.work_item_id, artifact.plan_scope()) {
+            (Some(item), Some(PlanScope::WorkItem(theirs))) => item == theirs,
+            (None, Some(PlanScope::Chat(chat))) => chat == caller.chat_id,
+            _ => false,
+        };
+        if !in_scope || artifact.kind != ArtifactKind::DecisionSheet || artifact.archived_at.is_some() {
+            return Err(ArtifactError::not_found("decision sheet not found"));
+        }
+        let bytes = self.current_bytes(&artifact)?;
+        let source = std::str::from_utf8(&bytes).map_err(|_| ArtifactError::invalid("sheet is not UTF-8"))?;
+        let sheet = mast_proto::decision_sheet::DecisionSheet::parse(source).map_err(ArtifactError::invalid)?;
+        let (_, orphans) = mast_proto::decision_sheet::partition_decisions(&sheet, &artifact.decisions);
+        let orphan_ids: Vec<&str> = orphans.iter().map(|d| d.row_id.as_str()).collect();
+        Ok(json!({"artifactId": artifact.id, "title": artifact.title, "revision": artifact.current_revision,
+            "decisions": artifact.decisions.iter().map(|d| { let mut value = serde_json::to_value(d).unwrap(); value["answer"] = if d.override_recommendation { json!(d.note) } else { Value::Null }; value }).collect::<Vec<_>>(), "orphanedRowIds": orphan_ids}))
     }
 
     /// Options artifacts in the caller's scope with a pick:
@@ -2552,7 +2871,7 @@ impl ArtifactsService {
                     .kind
                     .as_deref()
                     .and_then(ArtifactKind::parse)
-                    .unwrap_or_else(|| ArtifactKind::from_path(&path.to_string_lossy()));
+                    .unwrap_or_else(|| render_path_kind(&path, &bytes));
                 request.title = default_title_for(&path);
                 request.kind = kind;
                 request.path = path.to_string_lossy().into_owned();
@@ -2918,6 +3237,15 @@ mod tests {
             drop(stream);
             assert_eq!(broker.subscriber_count(), 0);
         });
+    }
+
+    #[test]
+    fn render_path_detects_structured_json_kind() {
+        for (kind, expected) in [("decision-sheet", ArtifactKind::DecisionSheet), ("plan", ArtifactKind::Plan), ("options", ArtifactKind::Options)] {
+            let content = format!(r#"{{"kind":"{kind}"}}"#);
+            assert_eq!(render_path_kind(Path::new("example.json"), content.as_bytes()), expected);
+        }
+        assert_eq!(render_path_kind(Path::new("example.json"), b"{}"), ArtifactKind::Markdown);
     }
 
     #[test]

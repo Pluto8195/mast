@@ -333,6 +333,9 @@ impl Shell {
             task: None,
             _subscriptions: subscriptions,
         });
+        // Re-subscribe on an explicit open so the host requests a rate-limited
+        // refresh even when this checkout was already prewarmed.
+        self.workspace_search_index_key = None;
         self.prewarm_workspace_search(cx);
         self.update_workspace_search(cx);
         cx.notify();
@@ -1066,6 +1069,15 @@ mod tests {
             .unwrap();
         cx.simulate_input(host.into(), "file");
         cx.run_until_parked();
+        let mut subscriptions = 0;
+        while let Ok(frame) = wire.requests.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            // Dropping the prewarmed stream also sends a cancellation frame.
+            if frame["method"] == mast_rpc::methods::WATCH_WORKSPACE_SEARCH_FILES {
+                subscriptions += 1;
+            }
+        }
+        assert_eq!(subscriptions, 1, "reopening requests a fresh index subscription");
         cx.executor().advance_clock(Duration::from_millis(160));
         cx.run_until_parked();
         let mut searches = Vec::new();

@@ -2,10 +2,13 @@
 use super::*;
 use super::work_outline_ui::WorkOutlineModal;
 use crate::work_outline::actions::OperationSlot;
+use crate::pickers::Pickers;
 
 pub(super) struct HandOffDialog {
     chat_id: String,
     input: Entity<ComposerInput>,
+    pickers: Entity<Pickers>,
+    _picker_observe: Subscription,
     workers: Vec<String>,
     details_available: bool,
     archive: bool,
@@ -22,6 +25,23 @@ impl HandOffDialog {
 }
 
 impl Shell {
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn fixture_snapshot_hand_off(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, _| {
+            if let Some(worker) = state.chats.iter_mut().find(|chat| chat.id == "fixture-design") {
+                worker.parent_chat_id = Some("fixture-chat".into());
+            }
+        });
+        self.open_hand_off("fixture-chat".into(), cx);
+    }
+
+    pub(super) fn hand_off_pickers(&self) -> Option<Entity<Pickers>> {
+        match self.work_outline_modal.as_ref() {
+            Some(WorkOutlineModal::HandOff(dialog)) => Some(dialog.pickers.clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn has_hand_off_workers(&self, chat_id: &str, cx: &App) -> bool {
         self.state.read(cx).chats.iter().any(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
     }
@@ -35,6 +55,8 @@ impl Shell {
             .and_then(|id| snapshot.item(&id)));
         let summary = format!("Continue as coordinator for {}. Read the work item, its instructions, and the worker list below.", item.map(|item| item.title.as_str()).unwrap_or("this work item"));
         let details_available = item.is_some();
+        let config = chat.config.clone();
+        let device = chat.space_id.as_deref().and_then(|id| state.space_row(id)).map(|space| space.device_id.clone());
         let workers: Vec<String> = state.chats.iter().filter(|worker| !worker.archived && worker.parent_chat_id.as_deref() == Some(chat_id.as_str())).map(|worker| {
             let status = state.sessions.iter().find(|session| session.chat_id == worker.id)
                 .map(|session| match session.status {
@@ -48,6 +70,13 @@ impl Shell {
             format!("{} · {} · {}", worker.title.as_deref().unwrap_or("Untitled"), status, requests)
         }).collect();
         if workers.is_empty() { return; }
+        let composer_pickers = self.composer.read(cx).pickers().clone();
+        let pickers = cx.new(|cx| {
+            let mut pickers = Pickers::new_chat_launcher(&composer_pickers, device, cx);
+            pickers.seed_hand_off(config.as_ref(), cx);
+            pickers
+        });
+        let picker_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Summary", cx).with_text_metrics(12.5, 18.0).with_auto_grow();
             input.set_text(summary, cx);
@@ -58,7 +87,7 @@ impl Shell {
             self.open_chat(chat_id.clone(), cx);
         }
         self.begin_work_outline_modal(WorkOutlineModal::HandOff(HandOffDialog {
-            chat_id, input, workers, details_available, archive: false, submitting: false,
+            chat_id, input, pickers, _picker_observe: picker_observe, workers, details_available, archive: false, submitting: false,
             error: (!details_available).then(|| "Work item details are unavailable. Open the chat and try again.".into()),
             operation: OperationSlot::default(),
         }), cx);
@@ -105,8 +134,12 @@ impl Shell {
         let summary = dialog.input.read(cx).text().trim().to_owned();
         if summary.is_empty() { dialog.error = Some("Enter a summary".into()); cx.notify(); return; }
         let source = dialog.chat_id.clone();
-        let operation_id = dialog.operation.id_for(&summary);
-        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams { chat_id: source.clone(), summary, operation_id });
+        let choice = dialog.pickers.read(cx).resolved(cx);
+        let harness = choice.harness;
+        let model = choice.model;
+        let reasoning = choice.reasoning;
+        let operation_id = dialog.operation.id_for(&format!("{summary}|{harness:?}|{model:?}|{reasoning:?}"));
+        let task = actions.hand_off_orchestrator(mast_proto::HandOffOrchestratorParams { chat_id: source.clone(), summary, operation_id, harness, model, reasoning });
         dialog.submitting = true;
         dialog.error = None;
         cx.notify();
@@ -140,6 +173,7 @@ pub(super) fn hand_off_card(dialog: &HandOffDialog, theme: &Theme, cx: &mut Cont
         .debug_selector(|| "hand-off-dialog".into())
         .child(popover::dialog_title(theme, "Hand off to new chat"))
         .child(div().mt(px(12.0)).child(popover::dialog_field(&theme, dialog.input.clone().into_any_element())))
+        .child(div().mt(px(12.0)).child(dialog.pickers.clone()))
         .child(div().mt(px(12.0)).child(SharedString::from("Workers")))
         .child(div().id("hand-off-workers").max_h(px(180.0)).overflow_y_scroll().text_color(theme.text_muted).child(workers))
         .child(div().id("hand-off-archive").mt(px(12.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
@@ -211,10 +245,21 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().parent_chat_id = Some(CHAT_API.into());
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().config = Some(mast_proto::ChatConfig {
+                    harness: mast_proto::HarnessId::Codex, model: Some("source-model".into()), reasoning: None,
+                    model_options: Default::default(), sandbox: mast_proto::SandboxLevel::WorkspaceWrite, auto_approve: false,
+                });
                 state.work_outline_actions_override = Some(actions);
             });
             shell.open_hand_off(CHAT_API.into(), cx);
             let Some(WorkOutlineModal::HandOff(dialog)) = shell.work_outline_modal.as_mut() else { panic!() };
+            dialog.pickers.update(cx, |pickers, cx| {
+                let selected = pickers.resolved(cx);
+                assert_eq!(selected.harness, Some(mast_proto::HarnessId::Codex));
+                assert_eq!(selected.model.as_deref(), Some("source-model"));
+                pickers.pick_harness(mast_proto::HarnessId::ClaudeCode, cx);
+                pickers.pick_model_for_tests("claude-opus-5-5", cx);
+            });
             dialog.input.update(cx, |input, cx| input.set_text("Continue coordinating", cx));
             dialog.archive = true;
             shell.submit_hand_off(cx);
@@ -225,6 +270,8 @@ mod tests {
         assert_eq!(calls[0].0, mast_rpc::methods::HAND_OFF_ORCHESTRATOR);
         assert_eq!(calls[0].1["chatId"], CHAT_API);
         assert_eq!(calls[0].1["summary"], "Continue coordinating");
+        assert_eq!(calls[0].1["harness"], "claude-code");
+        assert_eq!(calls[0].1["model"], "claude-opus-5-5");
         assert!(calls[0].1["operationId"].as_str().is_some());
         shell.read_with(cx, |shell, _| {
             assert!(shell.work_outline_modal.is_none());

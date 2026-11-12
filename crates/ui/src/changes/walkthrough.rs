@@ -1175,9 +1175,8 @@ impl Render for Walkthrough {
                                 row.child(
                                     div()
                                         .id("review-notes")
-                                        .w(px(240.))
-                                        .min_w(px(200.))
-                                        .max_w(px(280.))
+                                        .when(self.changes.is_some(), |el| el.w(px(240.)).min_w(px(200.)).max_w(px(280.)))
+                                        .when(self.changes.is_none(), |el| el.flex_1().max_w(px(800.)).mx_auto())
                                         .min_h_0()
                                         .overflow_y_scroll()
                                         .when(true, |el| crate::components::walkthrough_notes(el, &theme))

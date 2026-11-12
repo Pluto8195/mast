@@ -47,7 +47,7 @@ Everything the user should see is published; Mast never discovers artifacts by s
 - **Existing files** (`work/`, `.local/`, earlier artifacts): publish them the same way; the first
   publish imports them as revision 1.
 
-For a data-driven decision sheet, write JSON following [the schema](artifact-kit/decision-sheet-schema.md) and publish it with `kind: "decision-sheet"`. Keep row IDs stable across revisions. Mast validates the JSON and renders the sheet using the artifact kit.
+For a data-driven decision sheet, write JSON following [the schema](artifact-kit/decision-sheet-schema.md) and publish it with `kind: "decision-sheet"`. Keep row IDs stable across revisions. Mast validates the JSON and renders the sheet using the artifact kit. Mark a row `optional: true` only when its change may be omitted; required rows cannot be rejected. Read `artifact_get_decisions` before revising: accepted recommendations, answer overrides, and rejected optional changes have distinct meanings described in the schema.
 
 ## 2. HTML
 

@@ -144,6 +144,13 @@ pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::She
     shell
 }
 
+/// Construct the chat fixture with its hand-off dialog open.
+pub fn handoff_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
+    let shell = chat_fixture(data_dir, cx);
+    shell.update(cx, |shell, cx| shell.fixture_snapshot_hand_off(cx));
+    shell
+}
+
 /// Construct an artifact pane with local, in-memory fixture content.
 pub fn artifact_fixture(window: &mut Window, cx: &mut App) -> Entity<impl Render + use<>> {
     crate::artifacts::tab::snapshot_fixture(window, cx)

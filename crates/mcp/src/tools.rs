@@ -137,15 +137,18 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "hand_off_orchestrator",
-            description: "Start a successor on this work item with your harness, model and sandbox, and hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
+            description: "Start a successor on this work item with your sandbox; harness and model default to yours. Hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
             input_schema: json!({"type":"object", "properties": {
                 "summary": {"type":"string", "description":"Context and next steps for the successor."},
+                "harness": {"type":"string", "description":"Successor harness id (see list_harnesses)."},
+                "model": {"type":"string", "description":"Successor model id (see list_models for the chosen harness)."},
+                "reasoning": {"type":"string", "description":"Reasoning level supported by the chosen model."},
                 "idempotencyKey": {"type":"string", "description":"Stable key for this hand-off; reuse on retry."}
             }, "required":["summary", "idempotencyKey"]}),
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
+            description: "Create a chat in a Space (or without a Space on a device) with a harness and model. Mast tools, worker reports and Required Actions work for claude-code and codex workers; worker approvals reach the user as prompts, and pending approvals wake the orchestrator. The new chat records your chat as its parent (parentChatId); a child in your Space inherits your work item and instructions. To run work on an allowed work item, pass `workItemId`: the child is started for that item (the same way Start Chat on an item is), attached to it with that item's effective instructions and execution setup, and a `prompt` is required (`cwd` and `branch` come from the item, so they are refused). `workItemId` must be your own item, one of its descendants, or anything inside your project (the nearest ancestor marked as a project; see `work_outline_read_subtree`; create items with `work_outline_create_child`). If `workItemId` is a project that has a worker destination (e.g. its \"Tasks\" container), the chat starts for that destination. Without `workItemId`, a chat inside a project that has a worker destination (and a `prompt`) starts its worker on a NEW item created under that destination, titled from `title` or the prompt, instead of nesting under your own item. Finished workers (`archivable: true` in list_chats / get_chat) can be archived with `archive_chat`. A child reports back with `report_to_parent` (queued, batched into your next \"Worker updates:\" when you are idle); suggest a compact STATUS / RESULT / NEXT report of at most 5 lines, without restating the task; you can also collect its result with `wait_for_turn` / `read_chat`, or from the Required Actions it raises (use `work_outline_read_subtree` for open requests). Optionally send a first prompt and wait for the reply. Returns the new chat id. When you run inside a Mast chat, idempotency_key (idempotencyKey also works) is required: reuse it when retrying the same request and you get the same chat back (never a duplicate; the same key with different inputs is an error), and the chat is created in your own Space on your device, with a sandbox no wider than yours (a child is Ask unless `autoApprove: true`, allowed only when you are on Auto).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -190,7 +193,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "report_to_parent",
-            description: "Send your final report (or an important update) to the chat that started you. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` and nothing is queued.",
+            description: "Send your final report (or an important update) to the chat that started you. Suggested format: STATUS: done|progress|blocked|question / RESULT / NEXT, at most 5 lines; do not restate the task. It is queued and reaches the parent in its next \"Worker updates:\" batch once the parent is idle and the user is not typing in it (returns `delivery: queuedForParent`, plus `heldReason` while held). Text over ~4 KB is cut and marked. Errors when you have no parent chat. The parent can turn worker reports off; then you get `parentReportsOff` and nothing is queued.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "text": { "type": "string", "description": "The report text." } },
@@ -266,13 +269,14 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::READ_SUBTREE,
-            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). Use it to see children and their requests. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
+            description: "Read-only view of your chat's work item (or a descendant) and everything below it as a nested tree: per item its id, title, status and effectiveStatus, the chats attached to it (id, title, status working/awaitingInput/errored/idle, lastMessageAt), and its open user action requests (id, text, detail, detailTruncated, originChatId, createdAt; detail is capped at 1000 characters, so when detailTruncated is true read the full text with `read_chat` on originChatId). By default completed items and their subtrees are omitted unless they contain open requests or non-archived working or awaitingInput chats; `completedOmitted` counts omitted direct children per parent. Set `includeCompleted` to include them. Archived items remain controlled by `includeArchived`. The requested root is always shown. Use it to see children and their requests. Limited to your item's subtree, or your project when you are inside one (pass `workItemId` to read a sibling such as Tasks); at most 300 items (`truncated` says when more exist; `childrenOmitted` marks items whose children were cut by `maxDepth` or the cap).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workItemId": { "type": "string", "description": "Your chat's item, a descendant, or any item inside your project. Defaults to the project's worker destination, else your chat's item." },
                     "maxDepth": { "type": "integer", "minimum": 0, "maximum": 8, "default": 4, "description": "Levels of descendants below the item to include." },
-                    "includeArchived": { "type": "boolean", "default": false, "description": "Also list archived items and chats." }
+                    "includeArchived": { "type": "boolean", "default": false, "description": "Also list archived items and chats." },
+                    "includeCompleted": { "type": "boolean", "default": false, "description": "Also list completed items and their subtrees." }
                 }
             }),
         },
@@ -321,7 +325,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: agent_tool_names::CREATE_USER_ACTION_REQUEST,
-            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, options, links, facts, detail, dedupeKey, toolCallId. Options have an id, label, and optional detail. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts. Labels are limited to 40 characters and fact values to 120; longer text is truncated with a warning.",
+            description: "Use this, alongside asking in chat and instead of relying only on your built-in ask-user prompt, whenever your chat's work item is blocked on a decision, approval, or missing information from the user; it stays open in Required Actions until resolved. Put a one-line question in `request`, context in `detail`, and a `dedupeKey` per topic. Calling again with the same key updates your open request. A plan approval linked to a plan shares that plan's card. The user may answer via Required Actions' Reply & resolve, which arrives as a chat message starting `Re: \"…\"`; resolve the matching request when it does. Check that your chat has a work item with `work_outline_read_current`. Use your built-in quick question prompt only for small clarifications that do not block the work item. Required: request, and either idempotencyKey or dedupeKey (the dedupeKey stands in for the key). Use kind to distinguish ask, review, approve, choose, handoff (finished work), and notice (FYI); optional priority is blocking, normal, or fyi. Optional: kind, priority, options, links, facts, detail, dedupeKey, toolCallId. Options have an id, label, and optional detail. Links target artifact, file, diff, pr, chat, or https url; at most eight links and eight facts. Labels are limited to 40 characters and fact values to 120; longer text is truncated with a warning.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -339,7 +343,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                     "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
                     "facts": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string", "maxLength": 40 }, "value": { "type": "string", "maxLength": 120 } } } },
                     "detail": { "type": "string" },
-                    "dedupeKey": { "type": "string", "description": "Equivalent open requests with the same key are not repeated. With a dedupeKey, idempotencyKey is optional." },
+                    "dedupeKey": { "type": "string", "description": "An open request raised by this chat with the same key is updated in place. With a dedupeKey, idempotencyKey is optional." },
                     "toolCallId": { "type": "string" },
                     "idempotencyKey": json!({
                         "type": "string",
@@ -455,7 +459,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "path": { "type": "string", "description": "The file you wrote: absolute, or relative to your working directory (your worktree, the Space folder, or a temp folder)." },
                     "title": { "type": "string", "description": "Human title, e.g. \"Receiving flow — plan\". Same title + role on the same work item = same artifact." },
-                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet"], "description": "Defaults from the file extension." },
+                    "kind": { "type": "string", "enum": ["markdown", "html-fragment", "html-page", "mermaid", "image", "options", "decision-sheet", "plan"], "description": "Structured plan JSON uses kind plan; otherwise defaults from the file extension." },
                     "role": { "type": "string", "description": "plan, diagram, state-machine, comparison, or doc (free-form)." },
                     "note": { "type": "string", "description": "One line: what changed in this revision." },
                     "pinAsPlan": { "type": "boolean", "default": false, "description": "Make this the work item's plan (unpins the previous one)." },
@@ -471,6 +475,11 @@ fn artifact_catalog() -> Vec<ToolDef> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
+            name: agent_tool_names::ARTIFACT_GET_DECISIONS,
+            description: "Read sent decisions for a decision sheet in your work item, including row IDs, outcomes, notes, timestamps, revisions, and IDs no longer present in the sheet.",
+            input_schema: json!({"type": "object", "properties": {"artifactId": {"type": "string"}}, "required": ["artifactId"]}),
+        },
+        ToolDef {
             name: agent_tool_names::ARTIFACT_RENDER_CHECK,
             description: "Render an artifact exactly as Mast shows it (same wrapper, sandbox, and theme) in the Mast window on this device and return screenshots plus errors (console errors, blocked resources, Mermaid parse errors, empty render) and warnings (overflow, content outside the viewport, low contrast, and layout heuristics in layoutWarnings: clipped text, overlapping siblings, narrow text columns, elements wider than their parent, fixed widths wider than the viewport). By default it renders a narrow (800x800) and a wide (1440x900) viewport in the current theme; pass `themes: [\"light\", \"dark\"]` to check both themes (at most 4 images per call; each image comes with a label). Warnings are heuristics: always look at every screenshot. Run it after creating or changing any visual artifact, fix what is wrong, and check again. If it fails with renderUnavailable, say the artifact was not checked.",
             input_schema: json!({
@@ -478,6 +487,7 @@ fn artifact_catalog() -> Vec<ToolDef> {
                 "properties": {
                     "artifactId": { "type": "string", "description": "A published artifact of your work item." },
                     "path": { "type": "string", "description": "Or an unpublished file you wrote." },
+                    "kind": { "type": "string", "description": "Optional artifact kind override for a path." },
                     "viewports": {
                         "type": "array",
                         "description": "Viewports to render. Default: [{width: 800, height: 800, label: \"narrow\"}, {width: 1440, height: 900, label: \"wide\"}].",
@@ -2804,6 +2814,21 @@ mod tests {
         for phrase in ["claude-code", "codex", "worker reports", "Required Actions", "worker approvals", "wake the orchestrator"] {
             assert!(tool.description.contains(phrase), "missing {phrase}");
         }
+    }
+
+    #[test]
+    fn coordinator_tools_describe_compact_results() {
+        let mut definitions = catalog();
+        definitions.extend(work_outline_catalog());
+        let subtree = definitions.iter().find(|tool| tool.name == agent_tool_names::READ_SUBTREE).unwrap();
+        assert_eq!(subtree.input_schema["properties"]["includeCompleted"]["default"], false);
+        assert!(subtree.description.contains("completedOmitted"));
+        let report = definitions.iter().find(|tool| tool.name == "report_to_parent").unwrap();
+        for phrase in ["STATUS: done|progress|blocked|question", "RESULT", "NEXT", "5 lines", "do not restate"] {
+            assert!(report.description.contains(phrase), "missing {phrase}");
+        }
+        let create = definitions.iter().find(|tool| tool.name == "create_chat").unwrap();
+        assert!(create.description.contains("STATUS / RESULT / NEXT"));
     }
 
     #[tokio::test]

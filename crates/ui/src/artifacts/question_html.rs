@@ -80,17 +80,18 @@ pub(crate) const SCRIPT: &str = r##"(() => {
     const box = make("div", "zq-answer");
     const area = make("textarea");
     area.placeholder = "Your answer";
+    area.value = card.getAttribute("data-zq-draft") || "";
     area.maxLength = 600;
     const actions = make("div", "zq-actions");
-    const send = make("button", "zq-btn", "Send");
+    const send = make("button", "zq-btn", "Stage");
     send.type = "button"; send.setAttribute("data-primary", "");
     const cancel = make("button", "zq-btn", "Cancel");
     cancel.type = "button";
     const submit = () => {
       const text = area.value.trim();
       if (!text) return;
-      send.disabled = true; area.disabled = true; send.textContent = "Sending…";
       post({ t: "answer", id, text });
+      box.remove();
     };
     send.addEventListener("click", submit);
     cancel.addEventListener("click", () => box.remove());
@@ -124,6 +125,22 @@ pub(crate) const SCRIPT: &str = r##"(() => {
         card.insertBefore(row, decision);
       }
       row.querySelector(".zq-value").textContent = text;
+    });
+  };
+  const applyDrafts = (drafts) => {
+    document.querySelectorAll(Q_SEL).forEach(card => {
+      const id = (qid(card) || "").trim().toUpperCase();
+      const text = drafts[id];
+      let row = card.querySelector('.zq-row[data-zq-key="draft"]');
+      if (!text) { card.removeAttribute("data-zq-draft"); if (row) row.remove(); return; }
+      card.setAttribute("data-zq-draft", text);
+      if (!row) { row = make("div", "zq-row"); row.setAttribute("data-zq-key", "draft"); row.appendChild(make("div", "zq-label", "Not sent")); row.appendChild(make("div", "zq-value")); card.appendChild(row); }
+      row.querySelector(".zq-value").textContent = text;
+      if (!row.querySelector("button")) {
+        const undo = make("button", "zq-btn", "Undo"); undo.type = "button";
+        undo.addEventListener("click", () => post({t:"question-undo", id}));
+        row.appendChild(undo);
+      }
     });
   };
   const build = (card) => {
@@ -171,13 +188,14 @@ pub(crate) const SCRIPT: &str = r##"(() => {
       head.appendChild(toggle);
     }
   };
-  const run = () => document.querySelectorAll(Q_SEL).forEach(build);
+  const run = () => { document.querySelectorAll(Q_SEL).forEach(build); applyDrafts(window.__mastQuestionDrafts || {}); };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
   else run();
   // While find is active, resolved cards show everything they match.
   window.addEventListener("message", (event) => {
     const data = event.data || {};
-    if ("mastAnswers" in data) applyAnswers(data.mastAnswers || {});
+    if ("mastQuestionDrafts" in data) applyDrafts(data.mastQuestionDrafts || {});
+    else if ("mastAnswers" in data) applyAnswers(data.mastAnswers || {});
     else if ("mastFind" in data) document.documentElement.toggleAttribute("data-zq-finding", String(data.mastFind) !== "");
     else if ("mastClear" in data) document.documentElement.removeAttribute("data-zq-finding");
   });

@@ -71,7 +71,7 @@ pub enum ButtonSize {
     Md,
 }
 
-fn is_horizon(theme: &Theme) -> bool {
+pub(crate) fn is_horizon(theme: &Theme) -> bool {
     theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon
 }
 

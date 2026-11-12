@@ -186,7 +186,7 @@ impl ArtifactTab {
         }
         match self.presenter() {
             Presenter::Markdown => Some(Surface::Markdown),
-            Presenter::Web(WebKind::Fragment | WebKind::DecisionSheet | WebKind::Page)
+            Presenter::Web(WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan | WebKind::Page)
                 if self.web_scriptable() =>
             {
                 Some(Surface::Web)
@@ -461,7 +461,7 @@ impl ArtifactTab {
         self.nav.web_count = None;
         self.nav.html_headings = match &self.body {
             Some(ArtifactBody::Web {
-                kind: WebKind::Fragment | WebKind::DecisionSheet | WebKind::Page,
+                kind: WebKind::Fragment | WebKind::DecisionSheet | WebKind::Plan | WebKind::Page,
                 source,
             }) => outline::html_headings(source),
             _ => Vec::new(),

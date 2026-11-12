@@ -1555,12 +1555,16 @@ struct SubagentTab {
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
 struct SidebarPane {
+    #[cfg(test)]
+    renders: usize,
     shell: gpui::WeakEntity<Shell>,
     _observation: Subscription,
 }
 
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        { self.renders += 1; }
         #[cfg(feature = "startup-bench")]
         let _render_span = crate::startup_measurement::MeasurementSpan::new("sidebar");
         crate::transcript::record_view_frame("sidebar");
@@ -1776,6 +1780,7 @@ pub struct Shell {
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    sidebar_row_extents: spaces::SidebarRowExtents,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2142,6 +2147,8 @@ impl Shell {
         });
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
+            #[cfg(test)]
+            renders: 0,
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
@@ -2262,6 +2269,7 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_row_extents: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -5086,6 +5094,7 @@ impl Shell {
                             self.settings.notifications_background_only,
                             self.settings.live_app_icon,
                             self.settings.show_menu_bar_item,
+                            self.settings.menu_bar_needs_you,
                             cx,
                         )
                     });
@@ -5102,6 +5111,7 @@ impl Shell {
                                 background_only,
                                 live_app_icon,
                                 menu_bar_item,
+                                menu_bar_needs_you,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -5111,6 +5121,7 @@ impl Shell {
                             this.settings.notifications_background_only = background_only;
                             this.settings.live_app_icon = live_app_icon;
                             this.settings.show_menu_bar_item = menu_bar_item;
+                            this.settings.menu_bar_needs_you = menu_bar_needs_you;
                             this.sync_status_light(cx);
                             this.sync_menu_bar(true, cx);
                             this.schedule_save(cx);
@@ -7078,6 +7089,10 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.sidebar_now();
+        if width <= 0.0 {
+            return div().w(px(0.0)).h_full().flex_none().into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
@@ -7094,7 +7109,7 @@ impl Shell {
         // itself below the chrome.
         crate::components::shell_parts::sidebar_frame(
             &theme,
-            self.sidebar_now(),
+            width,
             inner.into_any_element(),
             cx.listener(|this, _, _, cx| this.open_new_session(cx)),
         )
@@ -8982,7 +8997,8 @@ impl Shell {
             return;
         }
         if event.keystroke.key == "escape" && self.work_outline_modal_open() {
-            if !self.dismiss_work_outline_modal_skills(cx) {
+            let picker_closed = self.hand_off_pickers().is_some_and(|pickers| pickers.update(cx, |pickers, cx| pickers.close_open_popover(cx)));
+            if !picker_closed && !self.dismiss_work_outline_modal_skills(cx) {
                 self.cancel_work_outline_modal(window, cx);
             }
             cx.stop_propagation();
@@ -11872,6 +11888,7 @@ impl Render for Shell {
                 // Start Chat's model menu advertises the same slots.
                 let pickers = this
                     .start_chat_pickers()
+                    .or_else(|| this.hand_off_pickers())
                     .filter(|pickers| pickers.read(cx).is_open())
                     .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
                 let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
@@ -11949,7 +11966,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 // Inside Start Chat the shortcut opens the dialog's picker.
-                if let Some(pickers) = this.start_chat_pickers() {
+                if let Some(pickers) = this.start_chat_pickers().or_else(|| this.hand_off_pickers()) {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                     return;
                 }

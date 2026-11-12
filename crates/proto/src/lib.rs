@@ -8,6 +8,8 @@ pub mod agent;
 pub mod artifacts;
 pub mod chat_diff_target;
 pub mod diff_review;
+pub mod plan;
+pub mod plan_render;
 pub mod decision_sheet;
 pub mod decision_sheet_render;
 pub mod entities;

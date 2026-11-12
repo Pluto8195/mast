@@ -718,6 +718,8 @@ pub struct UiSettings {
     pub live_app_icon: bool,
     /// The macOS menu bar item: the lamp, the running list and account usage.
     pub show_menu_bar_item: bool,
+    /// Include Needs you in the menu bar popover.
+    pub menu_bar_needs_you: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
@@ -806,6 +808,12 @@ pub struct UiSettings {
     /// revision), for the "Updated since you last viewed" marker.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub artifact_last_viewed: HashMap<String, u32>,
+    /// Decision sheet drafts, keyed by artifact id and kept only on this device.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_decision_drafts: HashMap<String, mast_proto::decision_sheet::SheetDecisionDrafts>,
+    /// Staged plan answers, keyed by artifact id and revision.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub artifact_question_drafts: HashMap<String, (u32, HashMap<String, String>)>,
     /// Side-by-side layout per options artifact (artifact id to an encoded
     /// `SideLayout`). Unknown values are ignored on read.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -842,6 +850,8 @@ impl Default for UiSettings {
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             artifact_compare_modes: HashMap::new(),
             artifact_last_viewed: HashMap::new(),
+            artifact_decision_drafts: HashMap::new(),
+            artifact_question_drafts: HashMap::new(),
             artifact_side_layouts: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -855,6 +865,7 @@ impl Default for UiSettings {
             notifications_background_only: true,
             live_app_icon: true,
             show_menu_bar_item: true,
+            menu_bar_needs_you: false,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
@@ -1958,6 +1969,9 @@ impl UiSettings {
                 migrated = true;
             }
         }
+        if missing("menuBarNeedsYou") {
+            migrated = true;
+        }
         if migrated && let Err(error) = settings.save(data_dir) {
             tracing::warn!(%error, "failed to save ui settings migration");
         }
@@ -2394,6 +2408,7 @@ mod tests {
             assert!(settings.notifications_background_only);
             assert_eq!(settings.live_app_icon, existing);
             assert_eq!(settings.show_menu_bar_item, existing);
+            assert!(!settings.menu_bar_needs_you);
             let stored: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(UiSettings::path(&dir)).unwrap())
                     .unwrap();
@@ -2406,6 +2421,7 @@ mod tests {
                 "notificationsBackgroundOnly",
                 "liveAppIcon",
                 "showMenuBarItem",
+                "menuBarNeedsYou",
             ] {
                 assert!(stored.get(key).is_some(), "{key} was not persisted");
             }
@@ -2977,6 +2993,7 @@ mod tests {
             notifications_background_only: false,
             live_app_icon: false,
             show_menu_bar_item: false,
+            menu_bar_needs_you: true,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
             right_pane_open: true,
@@ -3047,6 +3064,13 @@ mod tests {
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             artifact_compare_modes: HashMap::from([("mermaid".to_string(), "source".to_string())]),
             artifact_last_viewed: HashMap::from([("a1".to_string(), 3)]),
+            artifact_decision_drafts: HashMap::from([("a1".into(), mast_proto::decision_sheet::SheetDecisionDrafts {
+                revision: 3,
+                decisions: vec![mast_proto::decision_sheet::SheetDecisionDraft {
+                    row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Decided, override_recommendation: false, note: Some("keep".into()),
+                }],
+            })]),
+            artifact_question_drafts: HashMap::from([("a2".into(), (3, HashMap::from([("Q-1".into(), "UTC".into())])))]),
             artifact_side_layouts: HashMap::new(),
             legacy_accent_color: None,
         };

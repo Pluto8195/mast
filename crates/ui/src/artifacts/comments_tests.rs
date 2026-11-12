@@ -19,6 +19,8 @@ const PAGE: &str = "<h2 id=\"intake\">Receiving intake</h2>\
 <p>Parts arrive at the dock.</p>\
 <div data-mast-question=\"Q-1\" data-status=\"open\">Merge by MPN?</div>";
 
+const SHEET: &str = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]},{"id":"D-4","title":"Other","optional":true,"status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+
 fn chat(id: &str) -> mast_proto::Chat {
     serde_json::from_value(json!({
         "id": id, "deviceId": "dev", "archived": false,
@@ -74,6 +76,15 @@ fn replies(kind: ArtifactKind, page: &'static str) -> Reply {
         methods::ARTIFACT_ANSWER_QUESTION => Ok(json!({
             "artifactId": params["artifactId"], "questionId": params["questionId"],
         })),
+        methods::ARTIFACT_SUBMIT_SHEET_DECISIONS => Ok(json!({
+            "artifactId": params["artifactId"],
+            "decisions": params["decisions"].as_array().unwrap().iter().map(|d| json!({
+                "rowId":d["rowId"], "outcome":d["outcome"], "overrideRecommendation":d["overrideRecommendation"], "note":d["note"], "at":1, "revision":params["revision"]
+            })).collect::<Vec<_>>()
+        })),
+        methods::ARTIFACT_ANSWER_QUESTIONS => Ok(json!({
+            "artifactId": params["artifactId"], "answers": params["answers"].as_array().unwrap().iter().map(|a| json!({"id":a["questionId"], "answer":a["answer"], "at":1, "revision":params["revision"]})).collect::<Vec<_>>()
+        })),
         methods::CONTINUE_CHAT_FOR_WORK_ITEM => Ok(json!({
             "chatId": params["chatId"], "messageId": "m", "commandId": "k", "state": "started",
         })),
@@ -107,7 +118,13 @@ fn open(
     Shown,
     &mut VisualTestContext,
 ) {
-    let (actions, calls) = scripted(replies(kind, PAGE));
+    open_page(cx, kind, comments, if kind == ArtifactKind::DecisionSheet { SHEET } else { PAGE })
+}
+
+fn open_page<'a>(
+    cx: &'a mut TestAppContext, kind: ArtifactKind, comments: Vec<ArtifactComment>, page: &'static str,
+) -> (Entity<ArtifactTab>, Calls, WebProbe, Shown, &'a mut VisualTestContext) {
+    let (actions, calls) = scripted(replies(kind, page));
     let shown: Shown = Default::default();
     let probe = WebProbe::default();
     let factory = FakeWebHost::probed_factory(shown.clone(), probe.clone());
@@ -320,19 +337,17 @@ fn html_question_cards_are_answered_through_the_bridge(cx: &mut TestAppContext) 
         vcx,
         json!({ "t": "answer", "id": "q-1", "text": "  By MPN " }),
     );
-    let answered = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTION);
+    assert!(method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).is_empty());
+    assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
+    tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
+    settle(vcx);
+    let answered = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS);
     assert_eq!(answered.len(), 1, "{answered:?}");
-    assert_eq!(answered[0]["questionId"], "Q-1");
-    assert_eq!(answered[0]["answer"], "By MPN");
+    assert_eq!(answered[0]["answers"][0]["questionId"], "Q-1");
+    assert_eq!(answered[0]["answers"][0]["answer"], "By MPN");
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
-    assert!(
-        sent[0]
-            .to_string()
-            .contains("Re: \\\"Q-1: Merge by MPN?\\\": By MPN"),
-        "{}",
-        sent[0]
-    );
+    assert_eq!(sent[0]["prompt"]["text"], "Answers for Flow: Q-1: By MPN");
     // The card updates in place: a command to the page, no reload.
     settle(vcx);
     let updates: Vec<_> = probe
@@ -405,4 +420,69 @@ fn app_documents_carry_the_bridge_and_render_checks_do_not() {
             "{kind:?} probe stays passive"
         );
     }
+}
+
+#[gpui::test]
+fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let (tab, calls, _probe, shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    assert!(shown.borrow().last().unwrap().1.contains("sheet-stage"));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":""}));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-4","outcome":"rejected","note":"too slow"}));
+    assert!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).is_empty());
+    assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 2));
+    frame(&tab, vcx, json!({"t":"sheet-undo","id":"D-2"}));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions.len(), 1));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":"Use UTC","overrideRecommendation":true}));
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert_eq!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).len(), 1);
+    let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
+    assert_eq!(sent.len(), 1);
+    let message = sent[0].to_string();
+    assert!(message.contains("D-2 answered: Use UTC"));
+    assert!(message.contains("D-4 rejected (too slow)"));
+    vcx.update(|_, cx| assert!(!crate::settings::current(cx).artifact_decision_drafts.contains_key(&id(1))));
+}
+
+#[gpui::test]
+fn sheet_drafts_survive_reopening(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    {
+        let (tab, _calls, _probe, _shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+        frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"decided","note":"keep this"}));
+    }
+    let (_tab, _calls, _probe, shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    let document = shown.borrow().last().unwrap().1.clone();
+    assert!(document.contains("keep this"));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions[0].note.as_deref(), Some("keep this")));
+}
+
+#[gpui::test]
+fn real_sheet_stages_and_sends(cx: &mut TestAppContext) {
+    let dir = init_ui(cx);
+    let Ok(path) = std::env::var("MAST_REAL_SHEET_TEST") else { return; };
+    let page: &'static str = Box::leak(std::fs::read_to_string(path).unwrap().into_boxed_str());
+    let (tab, calls, _probe, shown, vcx) = open_page(cx, ArtifactKind::DecisionSheet, Vec::new(), page);
+    assert!(shown.borrow().last().unwrap().1.contains("sheet-stage"));
+    for id in ["flow-release-hold", "ui-draft", "ui-partial", "rule-move-first"] {
+        frame(&tab, vcx, json!({"t":"sheet-stage","id":id,"outcome":"decided","note":""}));
+        vcx.update(|_, cx| assert!(crate::settings::current(cx).artifact_decision_drafts.get(&super::tests::id(1)).is_some_and(|d| d.decisions.iter().any(|d| d.row_id == id)), "{id}"));
+    }
+    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("settings/ui-settings.json")).unwrap()).unwrap();
+    assert_eq!(settings["artifactDecisionDrafts"][id(1)]["decisions"].as_array().unwrap().len(), 4);
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert_eq!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).len(), 1);
+}
+
+#[gpui::test]
+fn sheet_refusals_notify_the_tab_and_frame(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let (tab, _calls, probe, _shown, vcx) = open(cx, ArtifactKind::DecisionSheet, Vec::new());
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"missing","outcome":"decided","note":""}));
+    assert!(tab.read_with(vcx, |tab, _| tab.notice().unwrap().contains("no longer open")));
+    assert!(probe.scripts.borrow().iter().any(|s| s.contains("mastSheetStageRejected") && s.contains("missing")));
+    frame(&tab, vcx, json!({"t":"sheet-send"}));
+    assert!(tab.read_with(vcx, |tab, _| tab.notice().unwrap().contains("no staged decisions")));
+    assert!(probe.scripts.borrow().iter().any(|s| s.contains("mastSheetEnableSend")));
 }

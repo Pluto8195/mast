@@ -1057,3 +1057,38 @@ fn render_executor_serves_the_stream_with_bounded_concurrency(cx: &mut TestAppCo
     answered.sort();
     assert_eq!(answered, ["req-1", "req-2", "req-3"]);
 }
+
+#[gpui::test]
+fn structured_plan_builds_web_host(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let content = include_str!("../../../../docs/artifact-kit/plan-example.json");
+    let reply = reply_with(content_reply(ArtifactKind::Plan, 1, content, ArtifactContentEncoding::Utf8));
+    let (tab, _, shown, vcx) = open_tab(cx, artifact(&id(1), "Plan", ArtifactKind::Plan), reply);
+    assert_eq!(tab.read_with(vcx, |tab, _| tab.presenter()), Presenter::Web(super::model::WebKind::Plan));
+    assert!(shown.borrow()[0].1.contains("pl-strip"));
+}
+
+#[gpui::test]
+fn export_menu_matches_the_artifact_kind(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let cases = [
+        (ArtifactKind::Markdown, "# Markdown", false, true),
+        (ArtifactKind::HtmlFragment, "<p>Fragment</p>", true, false),
+        (ArtifactKind::HtmlPage, "<!doctype html><p>Page</p>", true, false),
+        (ArtifactKind::Mermaid, "graph TD; A-->B", true, false),
+        (ArtifactKind::Options, r#"{"title":"Options","options":[{"id":"a","label":"A","path":"a.html"}]}"#, true, false),
+        (ArtifactKind::Plan, include_str!("../../../../docs/artifact-kit/plan-example.json"), true, true),
+        (ArtifactKind::DecisionSheet, include_str!("../../../../docs/artifact-kit/decision-sheet-example.json"), true, true),
+    ];
+    for (index, (kind, text, visual, markdown)) in cases.into_iter().enumerate() {
+        let content = content_reply(kind, 2, text, ArtifactContentEncoding::Utf8);
+        let (_tab, _calls, _shown, vcx) = open_tab(cx, artifact(&id(index as u8 + 1), "Example", kind), reply_with(content));
+        let trigger = vcx.debug_bounds("artifact-export").expect("export trigger");
+        vcx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| { window.refresh(); window.draw(cx).clear(); });
+        assert_eq!(vcx.debug_bounds("artifact-export-html").is_some(), visual, "{kind:?}");
+        assert_eq!(vcx.debug_bounds("artifact-export-pdf").is_some(), visual, "{kind:?}");
+        assert_eq!(vcx.debug_bounds("artifact-export-markdown").is_some(), markdown, "{kind:?}");
+    }
+}

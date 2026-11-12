@@ -62,6 +62,9 @@ fn replies(drift: Option<ArtifactDriftReply>) -> Reply {
         methods::ARTIFACT_ANSWER_QUESTION => Ok(json!({
             "artifactId": params["artifactId"], "questionId": params["questionId"],
         })),
+        methods::ARTIFACT_ANSWER_QUESTIONS => Ok(json!({
+            "artifactId": params["artifactId"], "answers": params["answers"].as_array().unwrap().iter().map(|a| json!({"id":a["questionId"], "answer":a["answer"], "at":1, "revision":params["revision"]})).collect::<Vec<_>>()
+        })),
         methods::CONTINUE_CHAT_FOR_WORK_ITEM => Ok(json!({
             "chatId": params["chatId"], "messageId": "m", "commandId": "k", "state": "started",
         })),
@@ -179,17 +182,24 @@ fn answering_records_the_answer_and_tells_the_publishing_chat(cx: &mut TestAppCo
         tab.send_answer("Q-2".into(), cx);
     });
     settle(vcx);
-    let recorded = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTION);
+    assert!(method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).is_empty());
+    assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
+    tab.update(vcx, |tab, cx| tab.stage_question_answer("Q-1".into(), "By MPN".into(), cx));
+    settle(vcx);
+    tab.update(vcx, |tab, cx| tab.undo_question_draft("Q-1".into(), cx));
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_question_drafts[&id(1)].1.len(), 1));
+    tab.update(vcx, |tab, cx| tab.stage_question_answer("Q-1".into(), "By MPN".into(), cx));
+    settle(vcx);
+    assert!(has(vcx, "question-batch-send"));
+    tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
+    settle(vcx);
+    let recorded = method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS);
     assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0]["questionId"], "Q-2");
-    assert_eq!(recorded[0]["answer"], "UTC");
+    assert_eq!(recorded[0]["answers"].as_array().unwrap().len(), 2);
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["chatId"], "chat-latest");
-    assert_eq!(
-        sent[0]["prompt"]["text"],
-        "Re: \"Q-2: Which timezone applies?\": UTC"
-    );
+    assert_eq!(sent[0]["chatId"], "chat-api");
+    assert_eq!(sent[0]["prompt"]["text"], "Answers for Plan: Q-1: By MPN; Q-2: UTC");
     // Optimistically Answered before the snapshot catches up; input closed.
     let drawn = cards(vcx);
     assert!(
@@ -220,7 +230,7 @@ fn clicking_the_open_answer_input_keeps_focus_and_typing_lands(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn answering_still_records_when_the_chat_is_archived(cx: &mut TestAppContext) {
+fn answering_stays_staged_when_the_chat_is_archived(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let (tab, calls, vcx) = open(cx, plan(Vec::new()), vec![chat("chat-api", true)], None);
     tab.update_in(vcx, |tab, window, cx| {
@@ -231,10 +241,10 @@ fn answering_still_records_when_the_chat_is_archived(cx: &mut TestAppContext) {
         tab.send_answer("Q-1".into(), cx);
     });
     settle(vcx);
-    assert_eq!(
-        method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTION).len(),
-        1
-    );
+    tab.update(vcx, |tab, cx| tab.send_question_batch(cx));
+    settle(vcx);
+    assert!(method_calls(&calls, methods::ARTIFACT_ANSWER_QUESTIONS).is_empty());
+    vcx.update(|_, cx| assert_eq!(crate::settings::current(cx).artifact_question_drafts[&id(1)].1.len(), 1));
     assert!(method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM).is_empty());
     assert!(tab.read_with(vcx, |tab, _| {
         tab.notice().unwrap_or("").contains("unavailable")

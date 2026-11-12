@@ -184,6 +184,7 @@ pub fn render(
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
+                "handoff" => mast_ui::snapshot::handoff_fixture(data_dir, cx).into(),
                 "overview" => mast_ui::snapshot::overview_fixture(cx).into(),
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),

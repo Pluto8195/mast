@@ -123,6 +123,8 @@ pub struct QuestionUi {
 pub struct AnswerUi {
     /// Recorded answers by question id.
     pub answers: Rc<HashMap<String, String>>,
+    /// Locally staged answers, not yet sent.
+    pub drafts: Rc<HashMap<String, String>>,
     /// The question whose input is open.
     pub editing: Option<String>,
     /// The shared text input shown under the editing card.
@@ -133,6 +135,8 @@ pub struct AnswerUi {
     pub send: Rc<dyn Fn(String, &mut Window, &mut gpui::App)>,
     /// Close the input without sending.
     pub cancel: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    /// Remove one staged answer.
+    pub undo: Rc<dyn Fn(String, &mut Window, &mut gpui::App)>,
 }
 
 /// The state key of a question card: its id, else its block index.
@@ -558,12 +562,20 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                 crate::components::conversation_answer_button(
                     SharedString::from(format!("{row_key}-answer-{id}")),
                     format!("question-answer-{id}"),
-                    "Answer",
+                    if ui.drafts.contains_key(id) { "Change answer" } else { "Answer" },
                     false,
                     theme,
                 )
                 .on_click(move |_, window, cx| begin(target.clone(), window, cx)),
             )
+            .when(ui.drafts.contains_key(id), |row| {
+                let undo = ui.undo.clone();
+                let target = id.to_owned();
+                row.child(crate::components::conversation_answer_button(
+                    SharedString::from(format!("{row_key}-answer-undo-{id}")),
+                    format!("question-answer-undo-{id}"), "Undo", false, theme,
+                ).on_click(move |_, window, cx| undo(target.clone(), window, cx)))
+            })
             .into_any_element();
     }
     let (send, cancel) = (ui.send.clone(), ui.cancel.clone());
@@ -589,7 +601,7 @@ fn answer_affordance(id: &str, ui: &AnswerUi, row_key: &SharedString, theme: &Th
                     crate::components::conversation_answer_button(
                         SharedString::from(format!("{row_key}-answer-send-{id}")),
                         format!("question-answer-send-{id}"),
-                        "Send",
+                        "Stage",
                         true,
                         theme,
                     )
@@ -629,6 +641,9 @@ fn render_question(
         .zip(answer_ui)
         .and_then(|(id, ui)| ui.answers.get(id))
         .filter(|_| card.status != QuestionStatus::Resolved);
+    let draft_text = card.id.as_ref().zip(answer_ui)
+        .and_then(|(id, ui)| ui.drafts.get(id))
+        .filter(|_| card.status == QuestionStatus::Open);
     // An answer on the row makes an open question read Answered; a resolved
     // document status wins.
     let status = if card.status == QuestionStatus::Open && answer_text.is_some() {
@@ -761,6 +776,10 @@ fn render_question(
         } else {
             row
         });
+    }
+
+    if let Some(draft) = draft_text {
+        body = body.child(div().text_color(theme.text_muted).child(format!("Not sent: {draft}")));
     }
 
     if let Some(answer) = answer_text {

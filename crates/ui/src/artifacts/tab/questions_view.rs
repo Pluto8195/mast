@@ -10,7 +10,7 @@ use gpui::{
     prelude::*, px,
 };
 use mast_proto::{
-    ArtifactAnswerQuestionParams, ArtifactDriftParams, ArtifactDriftReply, ArtifactKind,
+    ArtifactDriftParams, ArtifactDriftReply, ArtifactKind,
     ArtifactView, PlanQuestion, extract_questions,
 };
 
@@ -31,10 +31,11 @@ pub(crate) struct QuestionState {
     /// Answers sent from this tab, shown until the snapshot carries them.
     local: HashMap<String, String>,
     /// What the Markdown preview was last given.
-    synced: Option<(Vec<(String, String)>, Option<String>, bool)>,
+    synced: Option<(Vec<(String, String)>, Vec<(String, String)>, Option<String>, bool)>,
     cached: Option<(u64, Vec<PlanQuestion>)>,
     /// Answers baked into the HTML document on screen (`data-answer`).
     pub(super) html_answers: HashMap<String, String>,
+    html_drafts: HashMap<String, String>,
     drift: Option<ArtifactDriftReply>,
     gate: DriftGate,
     /// The revision last recorded as viewed, and the one the previous
@@ -162,6 +163,12 @@ impl ArtifactTab {
         map
     }
 
+    fn question_drafts(&self, artifact: &ArtifactView, cx: &gpui::App) -> HashMap<String, String> {
+        crate::settings::current(cx).artifact_question_drafts.get(&artifact.id)
+            .filter(|(revision, _)| *revision == artifact.current_revision)
+            .map(|(_, drafts)| drafts.clone()).unwrap_or_default()
+    }
+
     /// Give the Markdown preview the answers and the Answer affordance
     /// (only while the current revision is on screen).
     fn sync_answers(
@@ -195,6 +202,12 @@ impl ArtifactTab {
                     self.present(window, cx);
                 }
             }
+            let drafts = self.question_drafts(artifact, cx);
+            if self.comments.ready && drafts != self.questions.html_drafts {
+                self.questions.html_drafts = drafts.clone();
+                let script = crate::artifacts::bridge::frame_command_script(&serde_json::json!({"mastQuestionDrafts": drafts}));
+                if let Some(web) = &mut self.web { web.run_script(&script, cx); }
+            }
             return;
         }
         let Some(preview) = self.markdown.clone() else {
@@ -204,8 +217,11 @@ impl ArtifactTab {
         let answers = self.answer_map(artifact);
         let mut sig: Vec<(String, String)> = answers.clone().into_iter().collect();
         sig.sort();
+        let drafts = self.question_drafts(artifact, cx);
+        let mut draft_sig: Vec<_> = drafts.clone().into_iter().collect();
+        draft_sig.sort();
         let editing = live.then(|| self.questions.answering.clone()).flatten();
-        let signature = (sig, editing.clone(), live);
+        let signature = (sig, draft_sig, editing.clone(), live);
         if self.questions.synced.as_ref() == Some(&signature) {
             return;
         }
@@ -214,9 +230,11 @@ impl ArtifactTab {
             let owner = cx.weak_entity();
             let begin = owner.clone();
             let send = owner.clone();
-            let cancel = owner;
+            let cancel = owner.clone();
+            let undo = owner;
             AnswerUi {
                 answers: Rc::new(answers),
+                drafts: Rc::new(drafts),
                 editing,
                 input: self
                     .questions
@@ -234,6 +252,7 @@ impl ArtifactTab {
                 cancel: Rc::new(move |_, cx| {
                     cancel.update(cx, |this, cx| this.cancel_answer(cx)).ok();
                 }),
+                undo: Rc::new(move |id, _, cx| { undo.update(cx, |this, cx| this.undo_question_draft(id, cx)).ok(); }),
             }
         });
         preview.update(cx, |preview, cx| preview.set_question_answers(ui, cx));
@@ -262,7 +281,8 @@ impl ArtifactTab {
                 input
             }
         };
-        input.update(cx, |input, cx| input.set_text("", cx));
+        let current = self.artifact(cx).and_then(|artifact| self.question_drafts(&artifact, cx).get(&id.to_ascii_uppercase()).cloned()).unwrap_or_default();
+        input.update(cx, |input, cx| input.set_text(&current, cx));
         let handle = input.focus_handle(cx);
         window.focus(&handle, cx);
         self.questions.answering = Some(id.to_ascii_uppercase());
@@ -304,103 +324,93 @@ impl ArtifactTab {
     /// Record the typed answer, then tell the chat that published the plan.
     pub(crate) fn send_answer(&mut self, id: String, cx: &mut Context<Self>) {
         let answer = self.typed_answer(cx);
-        self.submit_answer(id, answer, cx);
+        self.stage_question_answer(id, answer, cx);
     }
 
-    /// Record `answer` (typed in the Markdown card, or sent by an HTML card
-    /// through the frame bridge), then tell the chat that published the plan.
-    pub(crate) fn submit_answer(&mut self, id: String, answer: String, cx: &mut Context<Self>) {
+    /// Stage an answer on this device. No engine call or chat message occurs.
+    pub(crate) fn stage_question_answer(&mut self, id: String, answer: String, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
         let id = id.to_ascii_uppercase();
-        let answer = answer.trim().to_owned();
-        if answer.is_empty() || self.questions.busy {
-            return;
-        }
-        let Some(artifact) = self.artifact(cx) else {
+        let answer = answer.trim().chars().take(mast_proto::artifacts::MAX_ANSWER_CHARS).collect::<String>();
+        let Some(artifact) = self.artifact(cx) else { return; };
+        if answer.is_empty() || self.shown_or_current_revision(&artifact) != artifact.current_revision
+            || !self.plan_questions(artifact.kind).iter().any(|q| q.id == id && q.status == mast_proto::PlanQuestionStatus::Open) { return; }
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            let entry = settings.artifact_question_drafts.entry(artifact.id).or_insert_with(|| (artifact.current_revision, HashMap::new()));
+            if entry.0 != artifact.current_revision { *entry = (artifact.current_revision, HashMap::new()); }
+            entry.1.insert(id, answer);
+        });
+        self.questions.answering = None;
+        self.questions.synced = None;
+        cx.notify();
+    }
+
+    pub(crate) fn undo_question_draft(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
+        let artifact_id = self.artifact_id.clone();
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            if let Some((_, drafts)) = settings.artifact_question_drafts.get_mut(&artifact_id) {
+                drafts.remove(&id);
+                if drafts.is_empty() { settings.artifact_question_drafts.remove(&artifact_id); }
+            }
+        });
+        self.questions.synced = None;
+        cx.notify();
+    }
+
+    pub(crate) fn discard_question_drafts(&mut self, cx: &mut Context<Self>) {
+        if self.questions.busy { return; }
+        let id = self.artifact_id.clone();
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| { settings.artifact_question_drafts.remove(&id); });
+        self.questions.synced = None;
+        cx.notify();
+    }
+
+    pub(crate) fn send_question_batch(&mut self, cx: &mut Context<Self>) {
+        let Some(artifact) = self.artifact(cx) else { return; };
+        let drafts = self.question_drafts(&artifact, cx);
+        if drafts.is_empty() || self.questions.busy { return; }
+        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let Some(chat) = chat else {
+            self.notice = Some("The origin chat is unavailable. Answers remain staged.".into());
+            cx.notify();
             return;
         };
-        let question_text = self
-            .plan_questions(artifact.kind)
-            .into_iter()
-            .find(|question| question.id.eq_ignore_ascii_case(&id))
-            .map(|question| question.text)
-            .unwrap_or_default();
+        let mut answers: Vec<_> = drafts.iter().map(|(id, answer)| mast_proto::artifacts::PlanQuestionDraft { question_id: id.clone(), answer: answer.clone() }).collect();
+        answers.sort_by(|a, b| a.question_id.cmp(&b.question_id));
+        let message = format!("Answers for {}: {}", artifact.title, answers.iter().map(|a| format!("{}: {}", a.question_id, a.answer)).collect::<Vec<_>>().join("; "));
         self.questions.busy = true;
-        let call =
-            self.state
-                .read(cx)
-                .artifact_actions()
-                .answer_question(ArtifactAnswerQuestionParams {
-                    artifact_id: artifact.id.clone(),
-                    question_id: id.clone(),
-                    answer: answer.clone(),
-                });
+        let call = self.state.read(cx).artifact_actions().answer_questions(mast_proto::artifacts::ArtifactAnswerQuestionsParams { artifact_id: artifact.id.clone(), revision: artifact.current_revision, answers });
         let task = cx.spawn(async move |this, cx| {
             let reply = call.await;
             this.update(cx, |this, cx| {
                 this.questions.busy = false;
                 match reply {
-                    Ok(_) => this.answer_recorded(&artifact, id, question_text, answer, cx),
-                    Err(error) => {
-                        this.notice =
-                            Some(format!("Couldn\u{2019}t save the answer: {}", error.text()));
-                        cx.notify();
+                    Err(error) => this.notice = Some(format!("Couldn't save answers: {}", error.text())),
+                    Ok(reply) => {
+                        for answer in &reply.answers { this.questions.local.insert(answer.id.clone(), answer.answer.clone()); }
+                        this.discard_question_drafts(cx);
+                        {
+                            let delivery = crate::work_outline::required_actions_view::deliver_user_message(this.state.clone(), chat, message, crate::work_outline::actions::new_operation_id(), cx);
+                            let task = cx.spawn(async move |this, cx| { if let Err(error) = delivery.await { this.update(cx, |this, cx| { this.notice = Some(format!("Answers saved, but the chat wasn't told: {error}")); cx.notify(); }).ok(); } });
+                            this.questions.tasks.push(task);
+                        }
                     }
                 }
-            })
-            .ok();
+                cx.notify();
+            }).ok();
         });
         self.questions.tasks.push(task);
     }
 
-    fn answer_recorded(
-        &mut self,
-        artifact: &ArtifactView,
-        id: String,
-        question_text: String,
-        answer: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.questions.local.insert(id.clone(), answer.clone());
-        self.questions.answering = None;
-        self.questions.synced = None;
-        let chat = questions_ui::answer_target_chat(artifact).filter(|chat| {
-            self.state
-                .read(cx)
-                .chats
-                .iter()
-                .any(|row| row.id == *chat && !row.archived)
-        });
-        match chat {
-            Some(chat) => {
-                let delivery = crate::work_outline::required_actions_view::deliver_user_message(
-                    self.state.clone(),
-                    chat,
-                    questions_ui::answer_message(&id, &question_text, &answer),
-                    crate::work_outline::actions::new_operation_id(),
-                    cx,
-                );
-                let task = cx.spawn(async move |this, cx| {
-                    if let Err(message) = delivery.await {
-                        this.update(cx, |this, cx| {
-                            this.notice = Some(format!(
-                                "Answer saved, but the chat wasn\u{2019}t told: {message}"
-                            ));
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                });
-                self.questions.tasks.push(task);
-            }
-            // The publishing chat is gone: the answer is still on the row.
-            None => {
-                self.notice = Some(
-                    "Answer saved. The chat that published this plan is unavailable, so it wasn\u{2019}t told."
-                        .to_owned(),
-                );
-            }
-        }
-        cx.notify();
+    pub(super) fn render_question_batch_bar(&self, artifact: &ArtifactView, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.question_drafts(artifact, cx).len();
+        if count == 0 || self.shown_or_current_revision(artifact) != artifact.current_revision { return None; }
+        Some(div().flex_none().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(8.0)).border_t_1().border_color(theme.border).text_color(theme.text)
+            .child(format!("{count} answers ready"))
+            .child(div().id("question-batch-send").debug_selector(|| "question-batch-send".into()).cursor_pointer().child(format!("Send {count} answers")).on_click(cx.listener(|this, _, _, cx| this.send_question_batch(cx))))
+            .child(div().id("question-batch-discard").cursor_pointer().child("Discard").on_click(cx.listener(|this, _, _, cx| this.discard_question_drafts(cx))))
+            .into_any_element())
     }
 
     // ------------------------------------------------------------------

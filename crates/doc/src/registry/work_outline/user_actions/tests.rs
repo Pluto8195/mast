@@ -1185,6 +1185,25 @@ fn denied(f: &mut Fixture, mutation: WorkOutlineMutation) {
 }
 
 #[test]
+fn agents_can_update_only_their_own_open_requests() {
+    let mut f = fixture();
+    let own = f.own.clone();
+    let id = request(&mut f.doc, "editable-request", &own, Some("topic"));
+    let WorkOutlineMutation::CreateUserActionRequest(mut params) = request_params("edit", &own, "c1", Some("topic")) else { unreachable!() };
+    params.text = "Updated question".into();
+    let update = |id: String, params: CreateUserActionRequestParams| WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams { user_action_request_id: id, request: params });
+    as_agent(&mut f, update(id.clone(), params.clone())).unwrap();
+    assert_eq!(f.doc.user_action_request(&id).unwrap().text, "Updated question");
+    let foreign = f.foreign_request.clone();
+    denied(&mut f, update(foreign, params.clone()));
+    params.origin.kind = UserActionOriginKind::System;
+    denied(&mut f, update(id.clone(), params.clone()));
+    params.origin.kind = UserActionOriginKind::Chat;
+    apply(&mut f.doc, resolve_params("resolve-edit", &id, None)).unwrap();
+    assert!(as_agent(&mut f, update(id, params)).is_err());
+}
+
+#[test]
 fn agent_may_create_children_only_under_its_item() {
     let mut f = fixture();
     let (own, child, sibling, parent) = (
