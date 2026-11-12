@@ -1979,6 +1979,11 @@ pub struct Changes {
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
     file_filter: Entity<ComposerInput>,
+    file_tree_collapsed: HashMap<String, std::collections::HashSet<String>>,
+    file_tree_focus: FocusHandle,
+    file_tree_focused_path: Option<String>,
+    file_list_width: f32,
+    file_list_resize_anchor: Option<(f32, f32)>,
     diff_focus: FocusHandle,
     review_target: Option<String>,
     review_link_chat: Option<String>,
@@ -2225,6 +2230,11 @@ impl Changes {
             highlights: HashMap::new(),
             rows: Vec::new(),
             file_filter,
+            file_tree_collapsed: HashMap::new(),
+            file_tree_focus: cx.focus_handle(),
+            file_tree_focused_path: None,
+            file_list_width: settings.changes_file_list_width,
+            file_list_resize_anchor: None,
             diff_focus: cx.focus_handle(),
             review_target: None,
             review_link_chat: None,
@@ -2883,7 +2893,7 @@ impl Changes {
         }
     }
 
-    fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
+    pub(crate) fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
             self.explanation_selection = None;
@@ -6910,6 +6920,14 @@ impl Render for Changes {
                                     .flex_row()
                                     .flex_1()
                                     .min_h_0()
+                                    .on_drag_move(cx.listener(|this, event: &gpui::DragMoveEvent<FileListResize>, _, cx| {
+                                        if let Some((start, width)) = this.file_list_resize_anchor {
+                                            let width = (width + f32::from(event.event.position.x) - start).clamp(160.0, 600.0);
+                                            this.file_list_width = width;
+                                            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| settings.changes_file_list_width = width);
+                                            cx.notify();
+                                        }
+                                    }))
                                     .children((!self.review_tour).then(|| self.render_file_list(&theme, cx)))
                                     .child(
                                         div()

@@ -372,6 +372,22 @@ mod tests {
     }
 
     #[test]
+    fn compact_folders_collapse_and_restore_descendants() {
+        let files = vec![FileDiff::new("src/hooks/nested/a.rs".into(), None), FileDiff::new("src/hooks/nested/b.rs".into(), None), FileDiff::new("src/other.rs".into(), None)];
+        let mut collapsed = std::collections::HashSet::new();
+        let (rows, folders) = super::file_tree_rows(&files, &[0, 1, 2], &collapsed);
+        assert!(rows.iter().any(|row| matches!(row, super::FileTreeRow::Folder { label, .. } if label == "hooks/nested")));
+        assert!(folders.contains(&"src/hooks/nested/".to_string()));
+        collapsed.insert("src/hooks/nested/".into());
+        let (rows, _) = super::file_tree_rows(&files, &[0, 1, 2], &collapsed);
+        assert!(rows.iter().any(|row| matches!(row, super::FileTreeRow::Folder { count: 2, collapsed: true, .. })));
+        assert!(!rows.iter().any(|row| matches!(row, super::FileTreeRow::File { index: 0 | 1, .. })));
+        collapsed.clear();
+        let (rows, _) = super::file_tree_rows(&files, &[0, 1, 2], &collapsed);
+        assert!(rows.iter().any(|row| matches!(row, super::FileTreeRow::File { index: 0, .. })));
+    }
+
+    #[test]
     fn generated_file_detection_uses_file_names() {
         assert!(is_generated_file("nested/Cargo.lock"));
         assert!(is_generated_file("web/app.min.js"));
@@ -397,6 +413,58 @@ fn file_matches_filter(file: &FileDiff, query: &str) -> bool {
             .old_path
             .as_ref()
             .is_some_and(|path| path.to_lowercase().contains(&query))
+}
+
+pub(super) struct FileListResize;
+struct FileListResizeGhost;
+impl Render for FileListResizeGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { gpui::Empty }
+}
+
+#[derive(Clone)]
+enum FileTreeRow {
+    Folder { path: String, label: String, depth: usize, count: usize, collapsed: bool },
+    File { index: usize, depth: usize },
+}
+
+fn file_tree_rows(files: &[FileDiff], indices: &[usize], collapsed: &std::collections::HashSet<String>) -> (Vec<FileTreeRow>, Vec<String>) {
+    fn visit(files: &[FileDiff], indices: &[usize], prefix: &str, depth: usize, collapsed: &std::collections::HashSet<String>, rows: &mut Vec<FileTreeRow>, folders: &mut Vec<String>, visible: bool) {
+        let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        for &index in indices {
+            let relative = files[index].path.strip_prefix(prefix).unwrap_or(&files[index].path);
+            if let Some((directory, _)) = relative.split_once('/') {
+                groups.entry(directory.to_owned()).or_default().push(index);
+            } else if visible {
+                rows.push(FileTreeRow::File { index, depth });
+            }
+        }
+        for (directory, members) in groups {
+            let mut path = format!("{prefix}{directory}/");
+            let mut label = directory;
+            loop {
+                let mut next = None;
+                let mut can_compact = true;
+                for &index in &members {
+                    let relative = files[index].path.strip_prefix(&path).unwrap_or("");
+                    let Some((part, _)) = relative.split_once('/') else { can_compact = false; break; };
+                    if next.as_deref().is_some_and(|previous| previous != part) { can_compact = false; break; }
+                    next = Some(part.to_owned());
+                }
+                if !can_compact { break; }
+                let Some(part) = next else { break; };
+                label.push('/'); label.push_str(&part);
+                path.push_str(&part); path.push('/');
+            }
+            let is_collapsed = collapsed.contains(&path);
+            folders.push(path.clone());
+            if visible { rows.push(FileTreeRow::Folder { path: path.clone(), label, depth, count: members.len(), collapsed: is_collapsed }); }
+            visit(files, &members, &path, depth + 1, collapsed, rows, folders, visible && !is_collapsed);
+        }
+    }
+    let mut rows = Vec::new();
+    let mut folders = Vec::new();
+    visit(files, indices, "", 0, collapsed, &mut rows, &mut folders, true);
+    (rows, folders)
 }
 
 impl Changes {
@@ -460,7 +528,13 @@ impl Changes {
                     .is_some_and(|file| file_matches_filter(file, &query))
             })
             .collect::<Vec<_>>();
-        let count = indices.len();
+        let tree_key = format!("{:?}:{:?}:{:?}", self.owner, self.scope, self.base_ref);
+        let collapsed = self.file_tree_collapsed.get(&tree_key).cloned().unwrap_or_default();
+        let (tree_rows, folders) = file_tree_rows(&files, &indices, &collapsed);
+        let rows_key = tree_key.clone();
+        let collapse_key = tree_key.clone();
+        let expand_key = tree_key.clone();
+        let count = tree_rows.len();
         let entity = cx.entity();
         let row_theme = theme.clone();
         let entries =
@@ -468,8 +542,34 @@ impl Changes {
                 entity.update(app, |_this, cx| {
                     let theme = &row_theme;
                     range
-                        .filter_map(|position| indices.get(position).copied())
-                        .map(|index| {
+                        .filter_map(|position| tree_rows.get(position).cloned())
+                        .map(|row| {
+                            let (index, depth) = match row {
+                                FileTreeRow::File { index, depth } => (index, depth),
+                                FileTreeRow::Folder { path, label, depth, count, collapsed } => {
+                                    let selector = format!("changes-folder-{path}");
+                                    let toggle_path = path.clone();
+                                    let toggle_key = rows_key.clone();
+                                    return div()
+                                        .id(SharedString::from(selector.clone()))
+                                        .debug_selector(move || selector.clone())
+                                        .flex().items_center().gap(px(5.0))
+                                        .pl(px(6.0 + depth as f32 * 14.0)).pr(px(6.0)).py(px(4.0))
+                                        .cursor_pointer()
+                                        .when(true, |element| crate::components::changes_file_row(element, theme))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.file_tree_focused_path = Some(toggle_path.clone());
+                                            window.focus(&this.file_tree_focus, cx);
+                                            let collapsed = this.file_tree_collapsed.entry(toggle_key.clone()).or_default();
+                                            if !collapsed.remove(&toggle_path) { collapsed.insert(toggle_path.clone()); }
+                                            cx.notify();
+                                        }))
+                                        .child(if collapsed { "▸" } else { "▾" })
+                                        .child(div().flex_1().min_w_0().truncate().text_size(px(11.0)).child(SharedString::from(label)))
+                                        .children(collapsed.then(|| div().text_size(px(10.0)).text_color(theme.text_muted).child(SharedString::from(count.to_string()))))
+                                        .into_any_element();
+                                }
+                            };
                             let file = &files[index];
                             let viewed = review_state.as_ref().is_some_and(|state| {
                                 if file.hunks.is_empty() {
@@ -482,7 +582,7 @@ impl Changes {
                             });
                             let label = match &file.old_path {
                                 Some(old) if old != &file.path => format!("{old} → {}", file.path),
-                                _ => file.path.clone(),
+                                _ => file.path.rsplit('/').next().unwrap_or(&file.path).to_owned(),
                             };
                             div()
                                 .id(("changes-file-list-entry", index))
@@ -490,7 +590,8 @@ impl Changes {
                                 .flex()
                                 .items_center()
                                 .gap(px(5.0))
-                                .px(px(6.0))
+                                .pl(px(6.0 + depth as f32 * 14.0))
+                                .pr(px(6.0))
                                 .py(px(4.0))
                                 .cursor_pointer()
                                 .when(true, |element| crate::components::changes_file_row(element, theme))
@@ -546,19 +647,44 @@ impl Changes {
             .min_h_0();
         div()
             .id("changes-file-list")
-            .w(px(240.0))
+            .w(px(self.file_list_width))
+            .relative()
+            .track_focus(&self.file_tree_focus)
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                if !this.file_tree_focus.is_focused(window) { return; }
+                if let Some(path) = this.file_tree_focused_path.clone() {
+                    let collapsed = this.file_tree_collapsed.entry(tree_key.clone()).or_default();
+                    match event.keystroke.key.as_str() {
+                        "left" => { collapsed.insert(path); cx.stop_propagation(); cx.notify(); }
+                        "right" => { collapsed.remove(&path); cx.stop_propagation(); cx.notify(); }
+                        _ => {}
+                    }
+                }
+            }))
             .flex_none()
             .min_h_0()
             .flex()
             .flex_col()
-            .border_r_1()
-            .border_color(theme.border)
+            .when(!crate::components::is_horizon(theme), |element| element.border_r_1().border_color(theme.border))
             .when(true, |element| crate::components::changes_file_list(element, theme))
             .child(popover::search_input_frame(
                 theme,
                 self.file_filter.clone().into_any_element(),
             ))
+            .child(div().flex().gap(px(8.0)).px(px(6.0))
+                .child(div().id("changes-folders-collapse").cursor_pointer().child("Collapse all").on_click(cx.listener(move |this, _, _, cx| {
+                    this.file_tree_collapsed.entry(collapse_key.clone()).or_default().extend(folders.iter().cloned()); cx.notify();
+                })))
+                .child(div().id("changes-folders-expand").cursor_pointer().child("Expand all").on_click(cx.listener(move |this, _, _, cx| {
+                    this.file_tree_collapsed.remove(&expand_key); cx.notify();
+                }))))
             .child(entries)
+            .child(div().id("changes-file-list-resize").absolute().right(px(-3.0)).top_0().bottom_0().w(px(6.0)).cursor_col_resize()
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.file_list_resize_anchor = Some((f32::from(event.position.x), this.file_list_width)); cx.stop_propagation();
+                }))
+                .on_drag(FileListResize, |_, _, _, cx| cx.new(|_| FileListResizeGhost))
+                .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.file_list_resize_anchor = None)))
             .into_any_element()
     }
 }
@@ -720,6 +846,32 @@ impl Changes {
 #[cfg(test)]
 mod navigation_tests {
     use super::*;
+
+    #[gpui::test]
+    fn folder_row_toggles_files(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| { gpui_base::init(cx); cx.set_global(Theme::dark()); });
+        let (changes, vcx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::for_checkout(state, "/repo".into(), cx)
+        });
+        vcx.update(|_, cx| changes.update(cx, |changes, cx| {
+            let patch = "diff --git a/src/hooks/a b/src/hooks/a\n--- a/src/hooks/a\n+++ b/src/hooks/a\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/src/hooks/b b/src/hooks/b\n--- a/src/hooks/b\n+++ b/src/hooks/b\n@@ -1 +1 @@\n-c\n+d\n";
+            let (files, origins, submodules, layout) = parse_diff_tree(patch, &[]);
+            let horizontal = files.iter().map(FileHorizontalState::new).collect();
+            changes.scoped = Some(CheckoutDiff { checkout_id: "checkout".into(), device_id: "device".into(), cwd: "/repo".into(), patch: patch.into(), files: Vec::new(), submodules: Vec::new(), additions: 2, deletions: 2, truncated: false, checksum: "sum".into(), updated_at: chrono::Utc::now() });
+            changes.parsed = Some(ParsedDiff { key: "test".into(), truncated: false, additions: 2, deletions: 2, file_count: 2, horizontal, hunk_identities: Arc::new(hunk_identities(&files)), files: Arc::new(files), origins: Arc::new(origins), submodules: Arc::new(submodules), layout: Arc::new(layout) });
+            changes.reflatten(cx);
+        }));
+        vcx.update(|window, cx| window.draw(cx).clear());
+        let folder = vcx.debug_bounds("changes-folder-src/hooks/").unwrap().center();
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+        vcx.simulate_click(folder, gpui::Modifiers::default());
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_none());
+        vcx.simulate_click(folder, gpui::Modifiers::default());
+        vcx.update(|window, cx| window.draw(cx).clear());
+        assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
+    }
 
     #[gpui::test]
     fn file_list_filters_rename_paths_and_jumps(cx: &mut gpui::TestAppContext) {
