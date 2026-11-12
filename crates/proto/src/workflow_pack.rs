@@ -217,6 +217,50 @@ pub struct WorkflowPackScopePreview {
     pub incoming: Vec<String>,
 }
 
+/// One project-template addition or conflict in the destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPackTemplatePreview {
+    pub name: String,
+    pub current: Option<TemplateNode>,
+    pub incoming: TemplateNode,
+}
+
+/// Compare templates by case-insensitive name, rejecting ambiguous targets.
+pub fn preview_template_import(
+    pack: &WorkflowPack,
+    snapshot: &WorkOutlineSnapshot,
+) -> Result<Vec<WorkflowPackTemplatePreview>, String> {
+    pack.validate()?;
+    if !snapshot.available || !snapshot.synced {
+        return Err("The destination Space is not available and synchronized".into());
+    }
+    let mut result = Vec::new();
+    for incoming in &pack.templates {
+        let matches: Vec<_> = snapshot
+            .templates
+            .iter()
+            .filter(|template| {
+                template.name.trim().to_lowercase() == incoming.name.trim().to_lowercase()
+            })
+            .collect();
+        if matches.len() > 1 {
+            return Err(format!(
+                "Destination template name is ambiguous: {}",
+                incoming.name
+            ));
+        }
+        let current = matches.first().map(|template| template.body.clone());
+        if current.as_ref() != Some(&incoming.body) {
+            result.push(WorkflowPackTemplatePreview {
+                name: incoming.name.clone(),
+                current,
+                incoming: incoming.body.clone(),
+            });
+        }
+    }
+    Ok(result)
+}
+
 /// Resolve each path without creating items or guessing among duplicate names.
 pub fn preview_instruction_import(
     pack: &WorkflowPack,
@@ -518,5 +562,29 @@ mod tests {
         let preview = preview_instruction_import(&pack, &unique).unwrap();
         assert_eq!(preview[0].work_item_id.as_deref(), Some("one"));
         assert_eq!(preview[0].incoming, vec!["Rule"]);
+    }
+
+    #[test]
+    fn template_preview_matches_names_and_shows_changes() {
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId": "destination", "available": true, "synced": true,
+            "templates": [{"id":"local", "name":"Project", "body":{"title":"Mine"}}]
+        }))
+        .unwrap();
+        let pack = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![],
+            templates: vec![WorkflowPackTemplate {
+                name: "project".into(),
+                body: TemplateNode {
+                    title: "Theirs".into(),
+                    ..Default::default()
+                },
+            }],
+        };
+        let preview = preview_template_import(&pack, &snapshot).unwrap();
+        assert_eq!(preview[0].current.as_ref().unwrap().title, "Mine");
+        assert_eq!(preview[0].incoming.title, "Theirs");
     }
 }

@@ -9,7 +9,8 @@ use std::path::Path;
 use mast_proto::WorkOutlineSnapshot;
 use mast_proto::workflow_pack::{
     WorkflowPack, WorkflowPackMode, WorkflowPackRedaction, WorkflowPackScopePreview,
-    collect_workflow_pack_candidate, preview_instruction_import, redact_workflow_pack,
+    WorkflowPackTemplatePreview, collect_workflow_pack_candidate, preview_instruction_import,
+    preview_template_import, redact_workflow_pack,
 };
 
 /// Maximum serialized size accepted from an untrusted pack file.
@@ -43,10 +44,18 @@ pub fn read_pack(path: &Path) -> Result<WorkflowPack, String> {
 pub fn preview_import(
     path: &Path,
     snapshot: &WorkOutlineSnapshot,
-) -> Result<(WorkflowPack, Vec<WorkflowPackScopePreview>), String> {
+) -> Result<
+    (
+        WorkflowPack,
+        Vec<WorkflowPackScopePreview>,
+        Vec<WorkflowPackTemplatePreview>,
+    ),
+    String,
+> {
     let pack = read_pack(path)?;
     let scopes = preview_instruction_import(&pack, snapshot)?;
-    Ok((pack, scopes))
+    let templates = preview_template_import(&pack, snapshot)?;
+    Ok((pack, scopes, templates))
 }
 
 #[cfg(test)]
