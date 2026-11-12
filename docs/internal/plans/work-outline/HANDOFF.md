@@ -28,6 +28,17 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 86: Needs-you cards in place + smaller coordinator reads** (2026-11-12, eeb144b88; tests for touched
+  crates from f45e1be44: nextest 2500/2502, only the known `peer::actual_webrtc_pair_streams…` and
+  `preview::leak remote_preview_churn` hang; UI 2630/0): a decision sheet's or plan's Needs-you card is keyed on the
+  artifact and updated in place across revisions (a resolved sheet card only reopens on a newer revision; plan
+  questions fold into the one plan card; legacy per-question cards keep working); agents update their own open request
+  through the `dedupeKey` path; a chat that read `~/.agents/skills/*/SKILL.md` or `~/.claude/skills/*/SKILL.md` gets
+  one "<name> skill changed since you loaded it" line on its next message (not on `/` commands);
+  `work_outline_read_subtree` omits completed items unless they hold open requests or live chats (`includeCompleted`,
+  `completedOmitted`; 46 KB → 1.2 KB on a 173-item fixture); `report_to_parent` / `create_chat` suggest STATUS /
+  RESULT / NEXT reports. Backup: `~/zeron-dev-app-backups/mast-release-85`.
+
 - **Release 85: PR #1 (David Wallach) idle CPU + input latency** (2026-11-12, 52ab0bcbb; tests for touched crates
   from 638cf1008: nextest 1327/1328, only the known Tailscale-only `peer::actual_webrtc_pair_streams…`; UI 2630/0):
   search index re-walks on repair or rate-limited picker open, idle indexes retire; diff sync ignores foreign git-dir
@@ -1132,6 +1143,21 @@ Coordinator tips:
   text, `read_chat` the `originChatId`.
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
+
+## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
+
+- **Installed: release 86.**
+- **Orchestrator friction** (report mast-artifact:1e838a8e, item 62aa8fe0): Mikey picked all four fixes.
+  - Skill edits are live in `~/.agents/skills` (implement-ticket, project-planner, talk-to-me); backup in
+    `~/skills-backups/2026-11-12-friction/`; awaiting his keep/undo (request 289320e7). He still has to paste the
+    Cofactr Space instruction and tell the kit coordinator (now 766c6a8e) to re-read the skills.
+  - Cards in place shipped in 86.
+  - Quiet wakes research (branch `orchestrator-quiet-wakes`, `docs/internal/plans/quiet-wakes.md`): holding routine
+    wakes saves ~4% of cache reads, so it's shelved, along with Jev stall triage. Coordinator context growth
+    (110k → 566k per call) drives the Opus cost. Proposed next: a coordinator size meter plus hand-off past ~200k;
+    awaiting Mikey. Coordinator reach and answer routing (D/E) are still wanted for friction.
+- **Running:** workflow pack (Terra 2bbe25e5) as before.
+- **Waiting on Mikey:** pinned tabs A (eb86590b); skill edits (289320e7); older a53732a1, 204f55c6, 99cf645c, 1ad5d3ee.
 
 ## In flight (snapshot 2026-11-12; coordinator f89abb61 handing off)
 
