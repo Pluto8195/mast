@@ -325,7 +325,10 @@ impl Shell {
                             .id(SharedString::from(changes_selector.clone()))
                             .debug_selector(move || changes_selector.clone())
                             .cursor_pointer()
-                            .text_color(theme.text_dim)
+                            .flex().items_center().gap(px(3.0))
+                            .text_size(crate::typography::ui_rems(10.5))
+                            .text_color(theme.text_muted)
+                            .child(crate::icons::icon(crate::icons::FILE_CODE).size(px(12.0)))
                             .child("Changes")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();

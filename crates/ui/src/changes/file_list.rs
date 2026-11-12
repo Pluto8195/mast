@@ -555,8 +555,19 @@ fn file_tree_rows(
 
 impl Changes {
     fn file_tree_key(&self) -> String {
-        let owner = self.owner.as_ref().map(|owner| (&owner.chat_id, &owner.device_id, &owner.cwd, &owner.checkout_id, &owner.range));
-        format!("{owner:?}:{:?}:{:?}:{:?}", self.pinned_cwd, self.scope, self.base_ref)
+        let owner = self.owner.as_ref().map(|owner| {
+            (
+                &owner.chat_id,
+                &owner.device_id,
+                &owner.cwd,
+                &owner.checkout_id,
+                &owner.range,
+            )
+        });
+        format!(
+            "{owner:?}:{:?}:{:?}:{:?}",
+            self.pinned_cwd, self.scope, self.base_ref
+        )
     }
 
     #[cfg(feature = "snapshot")]
@@ -566,6 +577,15 @@ impl Changes {
             .entry(key)
             .or_default()
             .insert("src/".into());
+        cx.notify();
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn focus_snapshot_file_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_list_width = 360.0;
+        self.file_list_resize_hover = true;
+        self.file_tree_focused_path = Some("src/hooks/decorated/".into());
+        window.focus(&self.file_tree_focus, cx);
         cx.notify();
     }
 
@@ -617,7 +637,12 @@ impl Changes {
         }
     }
 
-    pub(super) fn render_file_list(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_file_list(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(parsed) = self.parsed.as_ref() else {
             return div().into_any_element();
         };
@@ -647,6 +672,11 @@ impl Changes {
         let expand_key = tree_key.clone();
         let count = tree_rows.len();
         let entity = cx.entity();
+        let focused_path = self
+            .file_tree_focus
+            .is_focused(window)
+            .then(|| self.file_tree_focused_path.clone())
+            .flatten();
         let row_theme = theme.clone();
         let entries =
             gpui::uniform_list("changes-file-list-entries", count, move |range, _, app| {
@@ -664,6 +694,7 @@ impl Changes {
                                     count,
                                     collapsed,
                                 } => {
+                                    let focused = focused_path.as_ref() == Some(&path);
                                     let selector = format!("changes-folder-{path}");
                                     let toggle_path = path.clone();
                                     let toggle_key = rows_key.clone();
@@ -673,9 +704,10 @@ impl Changes {
                                         .flex()
                                         .items_center()
                                         .gap(px(5.0))
-                                        .pl(px(6.0 + depth as f32 * 14.0))
+                                        .pl(px(6.0 + depth as f32 * 16.0))
                                         .pr(px(6.0))
-                                        .py(px(4.0))
+                                        .h(px(28.0))
+                                        .when(focused, |row| row.bg(theme.element_hover))
                                         .cursor_pointer()
                                         .when(true, |element| {
                                             crate::components::changes_file_row(element, theme)
@@ -692,7 +724,15 @@ impl Changes {
                                             }
                                             cx.notify();
                                         }))
-                                        .child(if collapsed { "▸" } else { "▾" })
+                                        .child(
+                                            crate::icons::icon(if collapsed {
+                                                crate::icons::ALT_ARROW_RIGHT
+                                            } else {
+                                                crate::icons::ALT_ARROW_DOWN
+                                            })
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                        )
                                         .child(
                                             div()
                                                 .flex_1()
@@ -735,9 +775,9 @@ impl Changes {
                                 .flex()
                                 .items_center()
                                 .gap(px(5.0))
-                                .pl(px(6.0 + depth as f32 * 14.0))
+                                .pl(px(6.0 + depth as f32 * 16.0))
                                 .pr(px(6.0))
-                                .py(px(4.0))
+                                .h(px(28.0))
                                 .cursor_pointer()
                                 .when(true, |element| {
                                     crate::components::changes_file_row(element, theme)
@@ -747,25 +787,21 @@ impl Changes {
                                     window.focus(&this.diff_focus, cx);
                                 }))
                                 .child(
+                                    crate::icons::icon(crate::icons::FILE_CODE)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .children(review_state.is_some().then(|| {
                                     div()
                                         .id(("changes-file-viewed", index))
                                         .cursor_pointer()
                                         .text_color(theme.text_muted)
-                                        .when(true, |el| {
-                                            crate::components::review_text_action(el, theme)
-                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.toggle_review_file(index, cx);
                                         }))
-                                        .child(if review_state.is_none() {
-                                            "–"
-                                        } else if viewed {
-                                            "☑"
-                                        } else {
-                                            "□"
-                                        }),
-                                )
+                                        .child(if viewed { "☑" } else { "□" })
+                                }))
                                 .child(
                                     div()
                                         .flex_1()
@@ -835,37 +871,47 @@ impl Changes {
             .when(true, |element| {
                 crate::components::changes_file_list(element, theme)
             })
-            .child(popover::search_input_frame(
-                theme,
-                self.file_filter.clone().into_any_element(),
-            ))
             .child(
                 div()
                     .flex()
-                    .gap(px(8.0))
-                    .px(px(6.0))
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(div().flex_1().min_w_0().child(popover::search_input_frame(
+                        theme,
+                        self.file_filter.clone().into_any_element(),
+                    )))
                     .child(
-                        div()
-                            .id("changes-folders-collapse")
-                            .cursor_pointer()
-                            .child("Collapse all")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.file_tree_collapsed
-                                    .entry(collapse_key.clone())
-                                    .or_default()
-                                    .extend(folders.iter().cloned());
-                                cx.notify();
-                            })),
+                        Self::header_button(
+                            "changes-folders-collapse",
+                            crate::icons::FOLD_VERTICAL,
+                            theme,
+                        )
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Collapse all folders".into()))
+                                .into()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.file_tree_collapsed
+                                .entry(collapse_key.clone())
+                                .or_default()
+                                .extend(folders.iter().cloned());
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        div()
-                            .id("changes-folders-expand")
-                            .cursor_pointer()
-                            .child("Expand all")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.file_tree_collapsed.remove(&expand_key);
-                                cx.notify();
-                            })),
+                        Self::header_button(
+                            "changes-folders-expand",
+                            crate::icons::UNFOLD_VERTICAL,
+                            theme,
+                        )
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Expand all folders".into()))
+                                .into()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.file_tree_collapsed.remove(&expand_key);
+                            cx.notify();
+                        })),
                     ),
             )
             .child(entries)
@@ -879,6 +925,21 @@ impl Changes {
                     .bottom_0()
                     .w(px(6.0))
                     .cursor_col_resize()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.file_list_resize_hover = *hovered;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(2.0))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.0))
+                            .when(self.file_list_resize_hover, |line| {
+                                line.bg(theme.border_strong)
+                            }),
+                    )
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -1099,12 +1160,19 @@ mod navigation_tests {
         vcx.simulate_click(folder, gpui::Modifiers::default());
         vcx.update(|window, cx| window.draw(cx).clear());
         assert!(vcx.debug_bounds("changes-file-list-entry-0").is_some());
-        let start = vcx.debug_bounds("changes-file-list-resize").unwrap().center();
+        let start = vcx
+            .debug_bounds("changes-file-list-resize")
+            .unwrap()
+            .center();
         let modifiers = gpui::Modifiers::default();
         let left = gpui::MouseButton::Left;
         vcx.simulate_mouse_down(start, left, modifiers);
         vcx.simulate_mouse_move(start + gpui::point(px(4.0), px(0.0)), Some(left), modifiers);
-        vcx.simulate_mouse_move(start + gpui::point(px(450.0), px(0.0)), Some(left), modifiers);
+        vcx.simulate_mouse_move(
+            start + gpui::point(px(450.0), px(0.0)),
+            Some(left),
+            modifiers,
+        );
         vcx.simulate_mouse_up(start + gpui::point(px(450.0), px(0.0)), left, modifiers);
         changes.read_with(vcx, |changes, _| assert_eq!(changes.file_list_width, 600.0));
     }

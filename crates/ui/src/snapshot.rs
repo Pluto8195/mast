@@ -78,11 +78,12 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
 }
 
 /// Construct the Changes pane with its file tree expanded or collapsed.
-pub fn changes_fixture(collapsed: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+pub fn changes_fixture(collapsed: bool, focused: bool, window: &mut Window, cx: &mut App) -> Entity<crate::changes::Changes> {
     let changes = crate::changes::snapshot_populated_changes(cx);
     if collapsed {
         changes.update(cx, |changes, cx| changes.collapse_snapshot_file_tree(cx));
     }
+    if focused { changes.update(cx, |changes, cx| changes.focus_snapshot_file_tree(window, cx)); }
     changes
 }
 

@@ -180,7 +180,7 @@ pub fn render(
         style,
         layout,
         appearance,
-        move |_, cx| {
+        move |window, cx| {
             initialize(&data_dir, style, layout, appearance, &theme_id, cx);
             let view: AnyView = match screen.as_str() {
                 "chat" => mast_ui::snapshot::chat_fixture(data_dir, cx).into(),
@@ -189,8 +189,9 @@ pub fn render(
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
-                "changes-expanded" => mast_ui::snapshot::changes_fixture(false, cx).into(),
-                "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, cx).into(),
+                "changes-expanded" => mast_ui::snapshot::changes_fixture(false, false, window, cx).into(),
+                "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, false, window, cx).into(),
+                "changes-focus-resize" => mast_ui::snapshot::changes_fixture(false, true, window, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

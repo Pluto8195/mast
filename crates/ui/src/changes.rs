@@ -1984,6 +1984,7 @@ pub struct Changes {
     file_tree_focused_path: Option<String>,
     file_list_width: f32,
     file_list_resize_anchor: Option<(f32, f32)>,
+    file_list_resize_hover: bool,
     diff_focus: FocusHandle,
     review_target: Option<String>,
     review_link_chat: Option<String>,
@@ -2235,6 +2236,7 @@ impl Changes {
             file_tree_focused_path: None,
             file_list_width: settings.changes_file_list_width,
             file_list_resize_anchor: None,
+            file_list_resize_hover: false,
             diff_focus: cx.focus_handle(),
             review_target: None,
             review_link_chat: None,
@@ -6928,7 +6930,7 @@ impl Render for Changes {
                                             cx.notify();
                                         }
                                     }))
-                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, cx)))
+                                    .children((!self.review_tour).then(|| self.render_file_list(&theme, window, cx)))
                                     .child(
                                         div()
                                             .track_focus(&self.diff_focus)
