@@ -3206,6 +3206,20 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
             }
+            methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
+                let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                let (pack, redactions) = crate::workflow_pack::preview_export(&snapshot, p.mode)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"pack": pack, "redactions": redactions}))
+            }
+            methods::WORKFLOW_PACK_IMPORT_PREVIEW => {
+                let p: crate::workflow_pack::ImportPreviewParams = parse_params(params)?;
+                let snapshot = self.work_outline.snapshot(&p.space_id);
+                let (pack, scopes, templates) = crate::workflow_pack::preview_import(&p.path, &snapshot)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"pack": pack, "scopes": scopes, "templates": templates}))
+            }
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;

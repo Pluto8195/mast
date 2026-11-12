@@ -209,7 +209,8 @@ pub struct WorkflowPackScopeChange {
 
 /// An instruction scope resolved against a destination snapshot. IDs are
 /// ephemeral preview data and are never serialized into a pack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowPackScopePreview {
     pub item_path: Vec<String>,
     pub work_item_id: Option<String>,
@@ -218,7 +219,8 @@ pub struct WorkflowPackScopePreview {
 }
 
 /// One project-template addition or conflict in the destination.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowPackTemplatePreview {
     pub name: String,
     pub current: Option<TemplateNode>,

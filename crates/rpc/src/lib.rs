@@ -151,6 +151,9 @@ pub mod methods {
     /// forwardable; hosts that predate the feature answer `unknown method`,
     /// which clients treat as "unsupported host".
     pub const WATCH_WORK_OUTLINE: &str = "WatchWorkOutline";
+    /// Read-only workflow-pack export and import previews.
+    pub const WORKFLOW_PACK_EXPORT_PREVIEW: &str = "WorkflowPackExportPreview";
+    pub const WORKFLOW_PACK_IMPORT_PREVIEW: &str = "WorkflowPackImportPreview";
     /// Every Work Outline mutation, one tagged call:
     /// `mast_proto::WorkOutlineMutation` (`{op: createWorkItem|updateWorkItem|
     /// moveWorkItem|archiveWorkItem|restoreWorkItem|assignChatToWorkItem|

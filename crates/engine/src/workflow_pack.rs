@@ -12,9 +12,24 @@ use mast_proto::workflow_pack::{
     WorkflowPackTemplatePreview, collect_workflow_pack_candidate, preview_instruction_import,
     preview_template_import, redact_workflow_pack,
 };
+use serde::Deserialize;
 
 /// Maximum serialized size accepted from an untrusted pack file.
 pub const MAX_WORKFLOW_PACK_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportPreviewParams {
+    pub space_id: String,
+    pub mode: WorkflowPackMode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportPreviewParams {
+    pub space_id: String,
+    pub path: std::path::PathBuf,
+}
 
 /// Prepare the exact candidate and detected replacements for review.
 pub fn preview_export(
