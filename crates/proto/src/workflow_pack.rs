@@ -214,6 +214,8 @@ pub struct WorkflowPackScopeChange {
 pub struct WorkflowPackScopePreview {
     pub item_path: Vec<String>,
     pub work_item_id: Option<String>,
+    /// Index of the first missing path component, or None for a live scope.
+    pub missing_from: Option<usize>,
     pub current: Vec<String>,
     pub incoming: Vec<String>,
 }
@@ -275,7 +277,8 @@ pub fn preview_instruction_import(
     let mut result = Vec::new();
     for scope in &pack.scopes {
         let mut parent: Option<&str> = None;
-        for title in &scope.item_path {
+        let mut missing_from = None;
+        for (index, title) in scope.item_path.iter().enumerate() {
             let matches: Vec<_> = snapshot
                 .items
                 .iter()
@@ -288,10 +291,8 @@ pub fn preview_instruction_import(
             match matches.as_slice() {
                 [item] => parent = Some(item.id.as_str()),
                 [] => {
-                    return Err(format!(
-                        "Destination item not found: {}",
-                        scope.item_path.join(" / ")
-                    ));
+                    missing_from = Some(index);
+                    break;
                 }
                 _ => {
                     return Err(format!(
@@ -305,13 +306,20 @@ pub fn preview_instruction_import(
             .instructions
             .iter()
             .filter(|instruction| {
-                !instruction.archived() && instruction.work_item_id.as_deref() == parent
+                missing_from.is_none()
+                    && !instruction.archived()
+                    && instruction.work_item_id.as_deref() == parent
             })
             .map(|instruction| instruction.text.clone())
             .collect();
         result.push(WorkflowPackScopePreview {
             item_path: scope.item_path.clone(),
-            work_item_id: parent.map(str::to_owned),
+            work_item_id: if missing_from.is_some() {
+                None
+            } else {
+                parent.map(str::to_owned)
+            },
+            missing_from,
             current,
             incoming: scope.instructions.clone(),
         });
@@ -564,6 +572,10 @@ mod tests {
         let preview = preview_instruction_import(&pack, &unique).unwrap();
         assert_eq!(preview[0].work_item_id.as_deref(), Some("one"));
         assert_eq!(preview[0].incoming, vec!["Rule"]);
+        unique.items.clear();
+        let preview = preview_instruction_import(&pack, &unique).unwrap();
+        assert_eq!(preview[0].missing_from, Some(0));
+        assert!(preview[0].current.is_empty());
     }
 
     #[test]
