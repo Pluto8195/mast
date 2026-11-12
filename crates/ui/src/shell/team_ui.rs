@@ -267,6 +267,7 @@ impl Shell {
         let status = crate::status_style::status_style(worker.state.into(), theme.appearance);
         let indicator = crate::components::shell_parts::activity_indicator(worker.state.into(), format!("{prefix}-status-{id}"), theme, cx.entity_id(), cx);
         let open_id = id.clone();
+        let changes_id = id.clone();
         let menu_id = id.clone();
         let unseen = self.unseen_for_worker(&id);
         let stalled = self.state.read(cx).session_for(&id).and_then(|session| {
@@ -316,6 +317,17 @@ impl Shell {
                     )
                     .child(
                         crate::components::shell_parts::worker_metadata(theme, age, theme.text_faint),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{prefix}-changes-{id}")))
+                            .cursor_pointer()
+                            .text_color(theme.text_dim)
+                            .child("Changes")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_chat_changes(changes_id.clone(), cx);
+                            })),
                     ),
             );
         if let Some(report) = self.latest_report_for_worker(&id) {
