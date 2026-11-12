@@ -7008,11 +7008,11 @@ impl Render for Changes {
 }
 
 #[cfg(feature = "snapshot")]
-fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
+pub(crate) fn snapshot_populated_changes(cx: &mut App) -> Entity<Changes> {
     let state = cx.new(|_| AppState::new());
     cx.new(|cx| {
         let mut changes = Changes::new(state, cx);
-        let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    validate();\n+    save();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
+        let patch = "diff --git a/src/hooks/decorated/main.rs b/src/hooks/decorated/main.rs\n--- a/src/hooks/decorated/main.rs\n+++ b/src/hooks/decorated/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    old();\n+    validate();\n+    save();\n }\ndiff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-old model\n+new model\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old text\n+new text\n";
         let diff = CheckoutDiff {
             checkout_id: "snapshot".into(),
             device_id: "local".into(),

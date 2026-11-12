@@ -189,6 +189,8 @@ pub fn render(
                 "linear" => mast_ui::snapshot::linear_overview_fixture(cx).into(),
                 "linear-settings" => mast_ui::snapshot::linear_settings_fixture(cx).into(),
                 "team" => mast_ui::snapshot::team_fixture(data_dir, cx).into(),
+                "changes-expanded" => mast_ui::snapshot::changes_fixture(false, cx).into(),
+                "changes-collapsed" => mast_ui::snapshot::changes_fixture(true, cx).into(),
                 "details" => mast_ui::snapshot::outline_fixture(data_dir, cx).into(),
                 "walkthrough" => mast_ui::snapshot::walkthrough_fixture(cx).into(),
                 "appearance" => cx

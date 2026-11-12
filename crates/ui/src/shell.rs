@@ -3660,9 +3660,15 @@ impl Shell {
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let checkout = self.state.read(cx).chat_diff_targets(&chat_id).iter()
-            .find(|target| branch.as_ref().is_none_or(|branch| target.branch.as_ref() == Some(branch)))
-            .map(|target| target.path.clone());
+        let checkout = {
+            let state = self.state.read(cx);
+            let targets = state.chat_diff_targets(&chat_id);
+            targets.iter()
+                .find(|target| branch.as_ref().is_some_and(|branch| target.branch.as_ref() == Some(branch)))
+                .or_else(|| targets.iter().find(|target| target.selected))
+                .or_else(|| targets.first())
+                .map(|target| target.path.clone())
+        };
         if let Some(path) = checkout {
             let task = self.state.update(cx, |state, cx| {
                 state.clear_chat_diff_member_pick(&chat_id);

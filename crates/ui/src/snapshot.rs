@@ -77,6 +77,15 @@ pub fn populated_walkthrough_fixture(cx: &mut App) -> Entity<impl Render + use<>
     crate::changes::walkthrough::snapshot_fixture_with_changes(true, cx)
 }
 
+/// Construct the Changes pane with its file tree expanded or collapsed.
+pub fn changes_fixture(collapsed: bool, cx: &mut App) -> Entity<crate::changes::Changes> {
+    let changes = crate::changes::snapshot_populated_changes(cx);
+    if collapsed {
+        changes.update(cx, |changes, cx| changes.collapse_snapshot_file_tree(cx));
+    }
+    changes
+}
+
 /// Construct the offline shell used by the chat preview and gallery.
 pub fn chat_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let codex = std::env::var("MAST_PREVIEW_HARNESS").is_ok_and(|value| value == "codex");

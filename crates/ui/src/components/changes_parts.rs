@@ -221,9 +221,6 @@ pub(crate) fn file_comment_input<T: Styled + FluentBuilder>(element: T, theme: &
         .when(super::is_industrial(theme), |element| {
             element.bg(theme.input_bg)
         })
-        .when(super::is_horizon(theme), |element| {
-            element.bg(theme.accent.opacity(0.06))
-        })
 }
 
 pub(crate) enum FileAction {
