@@ -2007,6 +2007,17 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(repeated["userActionRequestId"], request_id.as_str());
+    let updated = call(
+        "work_outline_create_user_action_request",
+        json!({ "request": "Which release branch?", "detail": "Choose one", "dedupeKey": "branch", "facts": [{"label":"Version", "value":"2"}], "links": [{"label":"Reference", "target":{"type":"url", "url":"https://example.com/release"}}] }),
+    ).await.unwrap();
+    assert_eq!(updated["userActionRequestId"], request_id.as_str());
+    let updated_snapshot = snapshot(&rig);
+    let updated_request = updated_snapshot.user_action_requests.iter().find(|r| r.id == request_id).unwrap();
+    assert_eq!(updated_request.text, "Which release branch?");
+    assert_eq!(updated_request.info.as_deref(), Some("Choose one"));
+    assert_eq!(updated_request.facts[0].value, "2");
+    assert_eq!(updated_request.links[0].label, "Reference");
     assert_eq!(
         snapshot(&rig)
             .user_action_requests
@@ -2015,6 +2026,21 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
             .count(),
         1
     );
+    let explicit = |text: &str, key: &str| json!({"request":text, "dedupeKey":"explicit-update", "idempotencyKey":key});
+    let created_explicit = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    let repeated_explicit = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    assert_eq!(created_explicit["userActionRequestId"], repeated_explicit["userActionRequestId"]);
+    let changed_explicit = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    let repeated_change = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    assert_eq!(created_explicit["userActionRequestId"], changed_explicit["userActionRequestId"]);
+    assert_eq!(changed_explicit["userActionRequestId"], repeated_change["userActionRequestId"]);
+    assert!(call("work_outline_create_user_action_request", explicit("Different content", "explicit-update")).await.is_err());
+    call("work_outline_resolve_user_action_request", json!({"requestId":created_explicit["userActionRequestId"]})).await.unwrap();
+    let retry_create = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    let retry_update = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    assert_eq!(retry_create["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert_eq!(retry_update["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert!(request_is_resolved(&snapshot(&rig), created_explicit["userActionRequestId"].as_str().unwrap()));
     // `question` works as well, with an explicit key.
     let other = call(
         "work_outline_create_user_action_request",

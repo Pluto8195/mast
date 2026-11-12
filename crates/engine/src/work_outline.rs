@@ -159,6 +159,10 @@ fn replay_reply(mutation: &WorkOutlineMutation) -> WorkOutlineMutateReply {
             user_action_request_id: Some(derive_id(&p.operation_id, roles::REQUEST)),
             ..Default::default()
         },
+        WorkOutlineMutation::UpdateUserActionRequest(p) => WorkOutlineMutateReply {
+            user_action_request_id: Some(p.user_action_request_id.clone()),
+            ..Default::default()
+        },
         WorkOutlineMutation::ProposeWorkItemInstruction(p) => WorkOutlineMutateReply {
             proposal_id: Some(derive_id(&p.operation_id, roles::PROPOSAL)),
             ..Default::default()
@@ -195,6 +199,11 @@ pub struct WorkOutlineService {
 }
 
 impl WorkOutlineService {
+    /// Whether an operation is already in the replay cache or durable ledger.
+    pub(crate) fn operation_was_applied(&self, operation_id: &str) -> bool {
+        self.gate.lock().unwrap_or_else(|error| error.into_inner()).get(operation_id).is_some()
+            || self.workspace.ledger_holds(&ledger_operation_key(operation_id))
+    }
     pub fn new(workspace: WorkspaceHost) -> Self {
         Self {
             workspace,

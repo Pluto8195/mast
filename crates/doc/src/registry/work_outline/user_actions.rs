@@ -8,9 +8,10 @@
 //! clock observation, size gate, one batch per logical mutation):
 //!
 //! - requests: id `derive_id(operationId, "request")`; `spaceId`,
-//!   `workItemId`, `chatId`, `messageId`, `toolCallId`, `text`, `info`,
-//!   `dedupeKey`, `createdBy`, `createdAt`, `inputsHash` are written once by
-//!   the create upsert, with `state: "open"`. Resolution is ONE op writing
+//!   `workItemId`, `dedupeKey`, `createdBy`, `createdAt`, `inputsHash` are
+//!   fixed at creation, except that the system can migrate an artifact key.
+//!   Open requests may update content and origin.
+//!   Resolution is ONE op writing
 //!   `state: "resolved"` and the ONE-field `resolution {by, at, note?}`; no
 //!   op ever writes `open` again, and the reader treats a present resolution
 //!   as resolved, so resolution is monotone. Resolving a request resolves
@@ -71,6 +72,65 @@ fn check_note(what: &str, note: Option<&str>) -> Outcome<()> {
 /// The first `max` Unicode scalar values of `text`.
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+fn validate_request_content(p: &CreateUserActionRequestParams) -> Outcome<()> {
+        check_text(
+            "The requested action",
+            &p.text,
+            user_action_limits::MAX_REQUEST_TEXT_CHARS,
+            true,
+        )?;
+        if let Some(info) = &p.info {
+            check_text(
+                "Supporting detail",
+                info,
+                user_action_limits::MAX_REQUEST_INFO_CHARS,
+                false,
+            )?;
+        }
+        if let Some(key) = &p.dedupe_key {
+            check_text(
+                "The deduplication key",
+                key,
+                user_action_limits::MAX_DEDUPE_KEY_CHARS,
+                true,
+            )?;
+        }
+        if p.links.len() > 8 || p.facts.len() > 8 {
+            return Err(invalid("At most 8 links and 8 facts are allowed"));
+        }
+        if p.links.iter().any(|link| link.label.chars().count() > 40) {
+            return Err(invalid("A link label exceeds 40 characters"));
+        }
+        if p.facts
+            .iter()
+            .any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120)
+        {
+            return Err(invalid("A fact label or value exceeds its character limit"));
+        }
+        if p.options.iter().any(|option| {
+            option.id.trim().is_empty()
+                || option.id.chars().count() > 120
+                || option.label.trim().is_empty()
+                || option.label.chars().count() > 120
+                || option
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.chars().count() > 1000)
+        }) {
+            return Err(invalid(
+                "Options require an id and label and must fit within their limits",
+            ));
+        }
+        let mut option_ids = std::collections::HashSet::new();
+        if p.options
+            .iter()
+            .any(|option| !option_ids.insert(&option.id))
+        {
+            return Err(invalid("Option ids must be unique"));
+        }
+    Ok(())
 }
 
 // ── lenient decoding (shared by the materializer and the mutators) ──────────
@@ -536,61 +596,7 @@ impl RegistryDoc {
     ) -> Outcome<String> {
         check_operation_id(&p.operation_id)?;
         check_id("work item", &p.work_item_id)?;
-        check_text(
-            "The requested action",
-            &p.text,
-            user_action_limits::MAX_REQUEST_TEXT_CHARS,
-            true,
-        )?;
-        if let Some(info) = &p.info {
-            check_text(
-                "Supporting detail",
-                info,
-                user_action_limits::MAX_REQUEST_INFO_CHARS,
-                false,
-            )?;
-        }
-        if let Some(key) = &p.dedupe_key {
-            check_text(
-                "The deduplication key",
-                key,
-                user_action_limits::MAX_DEDUPE_KEY_CHARS,
-                true,
-            )?;
-        }
-        if p.links.len() > 8 || p.facts.len() > 8 {
-            return Err(invalid("At most 8 links and 8 facts are allowed"));
-        }
-        if p.links.iter().any(|link| link.label.chars().count() > 40) {
-            return Err(invalid("A link label exceeds 40 characters"));
-        }
-        if p.facts
-            .iter()
-            .any(|fact| fact.label.chars().count() > 40 || fact.value.chars().count() > 120)
-        {
-            return Err(invalid("A fact label or value exceeds its character limit"));
-        }
-        if p.options.iter().any(|option| {
-            option.id.trim().is_empty()
-                || option.id.chars().count() > 120
-                || option.label.trim().is_empty()
-                || option.label.chars().count() > 120
-                || option
-                    .detail
-                    .as_ref()
-                    .is_some_and(|detail| detail.chars().count() > 1000)
-        }) {
-            return Err(invalid(
-                "Options require an id and label and must fit within their limits",
-            ));
-        }
-        let mut option_ids = std::collections::HashSet::new();
-        if p.options
-            .iter()
-            .any(|option| !option_ids.insert(&option.id))
-        {
-            return Err(invalid("Option ids must be unique"));
-        }
+        validate_request_content(p)?;
         let system_origin = p.origin.kind == UserActionOriginKind::System;
         if system_origin {
             if actor.kind != WorkOutlineActorKind::System {
@@ -696,6 +702,53 @@ impl RegistryDoc {
             &[(KIND_WORK_ITEMS, p.work_item_id.as_str())],
         )?;
         Ok(id)
+    }
+
+    /// Replace content without changing identity or resolution state.
+    pub fn update_user_action_request(
+        &mut self,
+        p: &mast_proto::UpdateUserActionRequestParams,
+        actor: &WorkOutlineActor,
+    ) -> Outcome<()> {
+        check_operation_id(&p.request.operation_id)?;
+        validate_request_content(&p.request)?;
+        let request = self.user_action_request(&p.user_action_request_id)
+            .ok_or_else(|| not_found("Request not found"))?;
+        if !request.is_open() || request.work_item_id != p.request.work_item_id
+            || (request.dedupe_key != p.request.dedupe_key && actor.kind != WorkOutlineActorKind::System) {
+            return Err(invalid("Request is resolved or does not match its key and work item"));
+        }
+        check_origin_id("message", p.request.origin.message_id.as_deref())?;
+        check_origin_id("tool call", p.request.origin.tool_call_id.as_deref())?;
+        match p.request.origin.kind {
+            UserActionOriginKind::System if !p.request.origin.chat_id.is_empty()
+                || p.request.origin.message_id.is_some() || p.request.origin.tool_call_id.is_some() => return Err(invalid("A system request has no origin Chat")),
+            UserActionOriginKind::Chat => {
+                check_id("origin Chat", &p.request.origin.chat_id)?;
+                let chat = self.chat(&p.request.origin.chat_id).ok().flatten().ok_or_else(|| not_found("The origin Chat was not found"))?;
+                if chat.space_id.as_deref() != Some(request.space_id.as_str()) {
+                    return Err(err(WorkOutlineErrorCode::CrossSpace, "The origin Chat belongs to another Space"));
+                }
+            }
+            _ => {}
+        }
+        let set = BTreeMap::from([
+            ("chatId".to_owned(), json!(p.request.origin.chat_id)),
+            ("originKind".to_owned(), json!(p.request.origin.kind)),
+            ("messageId".to_owned(), json!(p.request.origin.message_id)),
+            ("toolCallId".to_owned(), json!(p.request.origin.tool_call_id)),
+            ("dedupeKey".to_owned(), json!(p.request.dedupe_key)),
+            ("text".to_owned(), json!(p.request.text)),
+            ("info".to_owned(), json!(p.request.info)),
+            ("options".to_owned(), json!(p.request.options)),
+            ("links".to_owned(), json!(p.request.links)),
+            ("facts".to_owned(), json!(p.request.facts)),
+            ("kind".to_owned(), json!(p.request.kind.unwrap_or_default())),
+            ("priority".to_owned(), json!(p.request.priority)),
+        ]);
+        self.commit(vec![Planned::update(KIND_USER_ACTION_REQUESTS, &request.id, set)],
+            &[(KIND_WORK_ITEMS, request.work_item_id.as_str())])?;
+        Ok(())
     }
 
     /// `resolveUserActionRequest`: one resolution op per open request of the
@@ -1873,6 +1926,14 @@ impl RegistryDoc {
                     return Err(unauthorized(
                         "Agents may only raise requests on their own work item",
                     ));
+                }
+                Ok(())
+            }
+            WorkOutlineMutation::UpdateUserActionRequest(p) => {
+                let request = self.user_action_request(&p.user_action_request_id)
+                    .ok_or_else(|| not_found("Request not found"))?;
+                if request.chat_id != chat_id || p.request.origin.kind != UserActionOriginKind::Chat || p.request.origin.chat_id != chat_id || request.work_item_id != require_assigned()? {
+                    return Err(unauthorized("Agents may only update requests raised by their own Chat"));
                 }
                 Ok(())
             }

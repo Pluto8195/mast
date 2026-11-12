@@ -74,6 +74,9 @@ pub struct InstructionSidecar {
     /// Turn pins by user message id, oldest first.
     #[serde(default)]
     pub turns: Vec<InstructionTurnPin>,
+    /// Skill files read by this chat and the last mtime observed or announced.
+    #[serde(default)]
+    pub skill_mtimes: std::collections::BTreeMap<PathBuf, u128>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +103,31 @@ impl InstructionSidecar {
 }
 
 impl RunJournal {
+    pub fn record_skill_read(&self, chat_id: &str, path: &Path) -> Result<(), JournalError> {
+        let Some(mtime) = skill_mtime(path) else { return Ok(()); };
+        self.update_instruction_sidecar(chat_id, |sidecar| {
+            sidecar.skill_mtimes.insert(path.to_owned(), mtime) != Some(mtime)
+        })
+    }
+
+    pub fn pending_skill_changes(&self, chat_id: &str) -> Vec<(PathBuf, u128)> {
+        self.instruction_sidecar(chat_id).unwrap_or_default().skill_mtimes.into_iter()
+            .filter_map(|(path, observed)| skill_mtime(&path).filter(|mtime| *mtime > observed).map(|mtime| (path, mtime)))
+            .collect()
+    }
+
+    pub fn acknowledge_skill_changes(&self, chat_id: &str, changes: &[(PathBuf, u128)]) -> Result<(), JournalError> {
+        self.update_instruction_sidecar(chat_id, |sidecar| {
+            let mut updated = false;
+            for (path, mtime) in changes {
+                if let Some(observed) = sidecar.skill_mtimes.get_mut(path) && *mtime > *observed {
+                    *observed = *mtime;
+                    updated = true;
+                }
+            }
+            updated
+        })
+    }
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, JournalError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
@@ -585,6 +613,10 @@ impl RunJournal {
     }
 }
 
+fn skill_mtime(path: &Path) -> Option<u128> {
+    std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|duration| duration.as_nanos())
+}
+
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
 fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
     let file = match File::open(path) {
@@ -871,6 +903,31 @@ mod tests {
             revision_id: id.into(),
             revision_hash: format!("{id}-hash"),
         }
+    }
+
+    #[test]
+    fn skill_change_notice_is_delivered_once_per_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("planner");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, "skill").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_times(std::fs::FileTimes::new().set_modified(base)).unwrap();
+        let journal = RunJournal::open(dir.path().join("journals")).unwrap();
+        journal.record_skill_read("chat", &path).unwrap();
+        assert!(journal.pending_skill_changes("chat").is_empty());
+        file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(1))).unwrap();
+        let changes = journal.pending_skill_changes("chat");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(journal.pending_skill_changes("chat"), changes);
+        journal.acknowledge_skill_changes("chat", &changes).unwrap();
+        assert!(journal.pending_skill_changes("chat").is_empty());
+        let reopened = RunJournal::open(dir.path().join("journals")).unwrap();
+        assert!(reopened.pending_skill_changes("chat").is_empty());
+        file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(2))).unwrap();
+        assert_eq!(reopened.pending_skill_changes("chat").len(), 1);
     }
 
     #[test]

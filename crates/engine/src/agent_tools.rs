@@ -1723,6 +1723,51 @@ impl AgentToolsService {
         }
         // Requests are created on the Chat's own item, with the Chat as origin.
         let work_item_id = context.require_item("asking the user for an action")?;
+        let explicit_operation = if arguments.get("idempotencyKey").or_else(|| arguments.get("idempotency_key")).and_then(Value::as_str).is_some_and(|key| !key.trim().is_empty()) {
+            Some(context.operation_id(arguments)?)
+        } else { None };
+        let replay = explicit_operation.as_ref().is_some_and(|id| self.work_outline.operation_was_applied(id));
+        // A plan approval belongs to the artifact, even when the caller changes
+        // its own dedupe key on a later revision.
+        let lower_request = args.request.to_ascii_lowercase();
+        let is_plan_approval = lower_request.starts_with("approve plan")
+            || lower_request.starts_with("approve the plan")
+            || (args.kind == Some(mast_proto::UserActionKind::Approve)
+                && (args.links.iter().any(|link| matches!(link.target, mast_proto::RequestLinkTarget::Artifact { .. }))
+                    || args.detail.as_deref().is_some_and(|detail| !mast_proto::artifacts::artifact_links(detail).is_empty())));
+        let mut approval_plan_id = None;
+        if is_plan_approval {
+            let linked: Vec<String> = args.links.iter().filter_map(|link| match &link.target {
+                mast_proto::RequestLinkTarget::Artifact { id } => Some(id.clone()),
+                _ => None,
+            }).chain(args.detail.as_deref().into_iter().flat_map(mast_proto::artifacts::artifact_links).map(|link| link.target)).collect();
+            let plans: Vec<_> = self.workspace.artifacts_of_space(&context.grant.space_id).into_iter()
+                .filter(|artifact| artifact.work_item_id.as_deref() == Some(work_item_id.as_str())
+                    && artifact.archived_at.is_none()
+                    && (artifact.pinned_as_plan || artifact.role.as_deref() == Some("plan")))
+                .filter(|artifact| if linked.is_empty() { artifact.pinned_as_plan } else { linked.contains(&artifact.id) })
+                .collect();
+            if let [plan] = plans.as_slice() {
+                approval_plan_id = Some(plan.id.clone());
+                args.kind = Some(mast_proto::UserActionKind::Approve);
+                args.dedupe_key = Some(crate::artifact_questions::approval_key(&plan.id));
+                args.detail = Some(crate::artifact_questions::approval_info(args.detail.as_deref(), plan));
+                if args.links.len() < 8 && !args.links.iter().any(|link| matches!(&link.target, mast_proto::RequestLinkTarget::Artifact { id } if id == &plan.id)) {
+                    args.links.push(mast_proto::RequestLink { label: "Plan".to_owned(), target: mast_proto::RequestLinkTarget::Artifact { id: plan.id.clone() } });
+                }
+                if !replay && let Some(artifacts) = lock(&self.artifacts).clone() {
+                    crate::artifact_questions::ArtifactQuestionSync::new(artifacts).reconcile(&plan.id);
+                }
+            }
+        }
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        if !replay && let Some(plan_id) = &approval_plan_id {
+            let key = crate::artifact_questions::approval_key(plan_id);
+            if snapshot.user_action_requests.iter().any(|r| r.is_unresolved() && r.work_item_id == work_item_id
+                && r.dedupe_key.as_deref() == Some(key.as_str()) && r.chat_id != context.grant.chat_id) {
+                return Err(AgentToolError::invalid("The plan card belongs to its current publishing chat"));
+            }
+        }
         // A `dedupeKey` stands in for a missing `idempotencyKey`; without
         // either, a retry could duplicate the request.
         let operation_id = match non_empty(args.dedupe_key.clone()) {
@@ -1768,8 +1813,7 @@ impl AgentToolsService {
             })?,
             None => context.operation_id(arguments)?,
         };
-        let mutation =
-            WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        let request = CreateUserActionRequestParams {
                 options: args.options,
                 links: args.links,
                 facts: args.facts,
@@ -1791,8 +1835,70 @@ impl AgentToolsService {
                 info: non_empty(args.detail),
                 dedupe_key: non_empty(args.dedupe_key),
                 operation_id,
-            });
+            };
+        if replay {
+            let mut variants = vec![request.clone()];
+            if let Some(plan) = approval_plan_id.as_ref().and_then(|id| self.workspace.artifact(id)) {
+                for revision in &plan.revisions {
+                    if revision.id == plan.current_revision { continue; }
+                    let mut prior = request.clone();
+                    if let Some(info) = prior.info.as_mut() {
+                        *info = info.lines().map(|line| if line.starts_with("Plan revision: ") {
+                            format!("Plan revision: {}", revision.id)
+                        } else { line.to_owned() }).collect::<Vec<_>>().join("\n");
+                    }
+                    variants.push(prior);
+                }
+            }
+            let mut result = None;
+            let mut error = None;
+            for candidate in variants {
+                match self.apply(context, &WorkOutlineMutation::CreateUserActionRequest(candidate.clone())) {
+                    Ok(reply) => { result = Some(reply); break; }
+                    Err(failure) => error = Some(failure),
+                }
+                for target in snapshot.user_action_requests.iter().filter(|r| r.work_item_id == work_item_id && r.dedupe_key == request.dedupe_key) {
+                    if let Ok(reply) = self.apply(context, &WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams {
+                        user_action_request_id: target.id.clone(), request: candidate.clone(),
+                    })) { result = Some(reply); break; }
+                }
+                if result.is_some() { break; }
+            }
+            let result = result.ok_or_else(|| error.expect("a replay always has an input"))?;
+            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings}));
+        }
+        let existing = request.dedupe_key.as_ref().and_then(|key| {
+            snapshot.user_action_requests.iter().find(|r| r.is_unresolved()
+                && r.work_item_id == work_item_id && r.chat_id == context.grant.chat_id
+                && r.dedupe_key.as_ref() == Some(key))
+        });
+        let mutation = if let Some(existing) = existing {
+            let explicit_key = arguments.get("idempotencyKey").or_else(|| arguments.get("idempotency_key")).is_some();
+            if existing.text == request.text && existing.info == request.info
+                && existing.links == request.links && existing.facts == request.facts
+                && existing.options == request.options && existing.kind == Some(request.kind.unwrap_or_default())
+                && existing.priority == request.priority && !explicit_key {
+                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings}));
+            }
+            let mut request = request;
+            if !explicit_key {
+                request.operation_id = uuid::Uuid::new_v4().simple().to_string();
+            }
+            if explicit_key && mast_proto::work_outline::derive_id(&request.operation_id, mast_proto::work_outline::roles::REQUEST) == existing.id {
+                WorkOutlineMutation::CreateUserActionRequest(request)
+            } else {
+                WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams {
+                    user_action_request_id: existing.id.clone(), request,
+                })
+            }
+        } else {
+            WorkOutlineMutation::CreateUserActionRequest(request)
+        };
         let reply = self.apply(context, &mutation)?;
+        if let Some(plan_id) = approval_plan_id
+            && let Some(artifacts) = lock(&self.artifacts).clone() {
+            crate::artifact_questions::ArtifactQuestionSync::new(artifacts).reconcile(&plan_id);
+        }
         Ok(json!({
             "userActionRequestId": reply.user_action_request_id,
             "workItemId": work_item_id,
