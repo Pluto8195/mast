@@ -110,20 +110,23 @@ impl RunJournal {
         })
     }
 
-    pub fn skill_change_notices(&self, chat_id: &str) -> Result<Vec<String>, JournalError> {
-        let mut notices = std::collections::BTreeSet::new();
+    pub fn pending_skill_changes(&self, chat_id: &str) -> Vec<(PathBuf, u128)> {
+        self.instruction_sidecar(chat_id).unwrap_or_default().skill_mtimes.into_iter()
+            .filter_map(|(path, observed)| skill_mtime(&path).filter(|mtime| *mtime > observed).map(|mtime| (path, mtime)))
+            .collect()
+    }
+
+    pub fn acknowledge_skill_changes(&self, chat_id: &str, changes: &[(PathBuf, u128)]) -> Result<(), JournalError> {
         self.update_instruction_sidecar(chat_id, |sidecar| {
-            for (path, observed) in &mut sidecar.skill_mtimes {
-                if let Some(mtime) = skill_mtime(path) && mtime > *observed {
-                    if let Some(name) = path.parent().and_then(Path::file_name).and_then(|s| s.to_str()) {
-                        notices.insert(format!("{name} skill changed since you loaded it; re-read it."));
-                        *observed = mtime;
-                    }
+            let mut updated = false;
+            for (path, mtime) in changes {
+                if let Some(observed) = sidecar.skill_mtimes.get_mut(path) && *mtime > *observed {
+                    *observed = *mtime;
+                    updated = true;
                 }
             }
-            !notices.is_empty()
-        })?;
-        Ok(notices.into_iter().collect())
+            updated
+        })
     }
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, JournalError> {
         let dir = dir.as_ref().to_path_buf();
@@ -914,14 +917,17 @@ mod tests {
         file.set_times(std::fs::FileTimes::new().set_modified(base)).unwrap();
         let journal = RunJournal::open(dir.path().join("journals")).unwrap();
         journal.record_skill_read("chat", &path).unwrap();
-        assert!(journal.skill_change_notices("chat").unwrap().is_empty());
+        assert!(journal.pending_skill_changes("chat").is_empty());
         file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(1))).unwrap();
-        assert_eq!(journal.skill_change_notices("chat").unwrap(), ["planner skill changed since you loaded it; re-read it."]);
-        assert!(journal.skill_change_notices("chat").unwrap().is_empty());
+        let changes = journal.pending_skill_changes("chat");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(journal.pending_skill_changes("chat"), changes);
+        journal.acknowledge_skill_changes("chat", &changes).unwrap();
+        assert!(journal.pending_skill_changes("chat").is_empty());
         let reopened = RunJournal::open(dir.path().join("journals")).unwrap();
-        assert!(reopened.skill_change_notices("chat").unwrap().is_empty());
+        assert!(reopened.pending_skill_changes("chat").is_empty());
         file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(2))).unwrap();
-        assert_eq!(reopened.skill_change_notices("chat").unwrap().len(), 1);
+        assert_eq!(reopened.pending_skill_changes("chat").len(), 1);
     }
 
     #[test]

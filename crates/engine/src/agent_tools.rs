@@ -1723,6 +1723,10 @@ impl AgentToolsService {
         }
         // Requests are created on the Chat's own item, with the Chat as origin.
         let work_item_id = context.require_item("asking the user for an action")?;
+        let explicit_operation = if arguments.get("idempotencyKey").or_else(|| arguments.get("idempotency_key")).and_then(Value::as_str).is_some_and(|key| !key.trim().is_empty()) {
+            Some(context.operation_id(arguments)?)
+        } else { None };
+        let replay = explicit_operation.as_ref().is_some_and(|id| self.work_outline.operation_was_applied(id));
         // A plan approval belongs to the artifact, even when the caller changes
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
@@ -1751,13 +1755,13 @@ impl AgentToolsService {
                 if args.links.len() < 8 && !args.links.iter().any(|link| matches!(&link.target, mast_proto::RequestLinkTarget::Artifact { id } if id == &plan.id)) {
                     args.links.push(mast_proto::RequestLink { label: "Plan".to_owned(), target: mast_proto::RequestLinkTarget::Artifact { id: plan.id.clone() } });
                 }
-                if let Some(artifacts) = lock(&self.artifacts).clone() {
+                if !replay && let Some(artifacts) = lock(&self.artifacts).clone() {
                     crate::artifact_questions::ArtifactQuestionSync::new(artifacts).reconcile(&plan.id);
                 }
             }
         }
         let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-        if let Some(plan_id) = &approval_plan_id {
+        if !replay && let Some(plan_id) = &approval_plan_id {
             let key = crate::artifact_questions::approval_key(plan_id);
             if snapshot.user_action_requests.iter().any(|r| r.is_unresolved() && r.work_item_id == work_item_id
                 && r.dedupe_key.as_deref() == Some(key.as_str()) && r.chat_id != context.grant.chat_id) {
@@ -1832,6 +1836,37 @@ impl AgentToolsService {
                 dedupe_key: non_empty(args.dedupe_key),
                 operation_id,
             };
+        if replay {
+            let mut variants = vec![request.clone()];
+            if let Some(plan) = approval_plan_id.as_ref().and_then(|id| self.workspace.artifact(id)) {
+                for revision in &plan.revisions {
+                    if revision.id == plan.current_revision { continue; }
+                    let mut prior = request.clone();
+                    if let Some(info) = prior.info.as_mut() {
+                        *info = info.lines().map(|line| if line.starts_with("Plan revision: ") {
+                            format!("Plan revision: {}", revision.id)
+                        } else { line.to_owned() }).collect::<Vec<_>>().join("\n");
+                    }
+                    variants.push(prior);
+                }
+            }
+            let mut result = None;
+            let mut error = None;
+            for candidate in variants {
+                match self.apply(context, &WorkOutlineMutation::CreateUserActionRequest(candidate.clone())) {
+                    Ok(reply) => { result = Some(reply); break; }
+                    Err(failure) => error = Some(failure),
+                }
+                for target in snapshot.user_action_requests.iter().filter(|r| r.work_item_id == work_item_id && r.dedupe_key == request.dedupe_key) {
+                    if let Ok(reply) = self.apply(context, &WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams {
+                        user_action_request_id: target.id.clone(), request: candidate.clone(),
+                    })) { result = Some(reply); break; }
+                }
+                if result.is_some() { break; }
+            }
+            let result = result.ok_or_else(|| error.expect("a replay always has an input"))?;
+            return Ok(json!({"userActionRequestId":result.user_action_request_id, "workItemId":work_item_id, "warnings":warnings}));
+        }
         let existing = request.dedupe_key.as_ref().and_then(|key| {
             snapshot.user_action_requests.iter().find(|r| r.is_unresolved()
                 && r.work_item_id == work_item_id && r.chat_id == context.grant.chat_id

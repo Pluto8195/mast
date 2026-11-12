@@ -2036,6 +2036,11 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     assert_eq!(changed_explicit["userActionRequestId"], repeated_change["userActionRequestId"]);
     assert!(call("work_outline_create_user_action_request", explicit("Different content", "explicit-update")).await.is_err());
     call("work_outline_resolve_user_action_request", json!({"requestId":created_explicit["userActionRequestId"]})).await.unwrap();
+    let retry_create = call("work_outline_create_user_action_request", explicit("Review this", "explicit-create")).await.unwrap();
+    let retry_update = call("work_outline_create_user_action_request", explicit("Review revision", "explicit-update")).await.unwrap();
+    assert_eq!(retry_create["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert_eq!(retry_update["userActionRequestId"], created_explicit["userActionRequestId"]);
+    assert!(request_is_resolved(&snapshot(&rig), created_explicit["userActionRequestId"].as_str().unwrap()));
     // `question` works as well, with an explicit key.
     let other = call(
         "work_outline_create_user_action_request",

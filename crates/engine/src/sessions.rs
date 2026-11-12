@@ -282,10 +282,18 @@ fn skill_read_paths(call: &mast_proto::ToolCall, home: &std::path::Path) -> Vec<
     }).collect()
 }
 
-fn prepend_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> String {
-    match journal.skill_change_notices(chat_id) {
-        Ok(notices) if !notices.is_empty() => format!("{}\n{}", notices.join("\n"), prompt),
-        _ => prompt.to_owned(),
+fn prepare_skill_notices(journal: &RunJournal, chat_id: &str, prompt: &str) -> (String, Vec<(std::path::PathBuf, u128)>) {
+    if prompt.trim_start().starts_with('/') { return (prompt.to_owned(), Vec::new()); }
+    let changes = journal.pending_skill_changes(chat_id);
+    let notices: std::collections::BTreeSet<_> = changes.iter().filter_map(|(path, _)| path.parent()?.file_name()?.to_str())
+        .map(|name| format!("{name} skill changed since you loaded it; re-read it.")).collect();
+    let delivered = if notices.is_empty() { prompt.to_owned() } else { format!("{}\n{prompt}", notices.into_iter().collect::<Vec<_>>().join("\n")) };
+    (delivered, changes)
+}
+
+fn acknowledge_skill_notices(journal: &RunJournal, chat_id: &str, changes: &[(std::path::PathBuf, u128)]) {
+    if !changes.is_empty() && let Err(error) = journal.acknowledge_skill_changes(chat_id, changes) {
+        tracing::warn!(%error, "could not record delivered skill notice");
     }
 }
 
@@ -970,7 +978,7 @@ impl SessionsEngine {
             plan.resume = None;
             plan.transition = InstructionTransition::Fresh;
         }
-        let delivered_prompt = prepend_skill_notices(&self.inner.journal, chat_id, &request.prompt);
+        let (delivered_prompt, skill_changes) = prepare_skill_notices(&self.inner.journal, chat_id, &request.prompt);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1020,6 +1028,7 @@ impl SessionsEngine {
                     tracing::warn!(chat = %chat_id, error = %err, "instruction sidecar write failed");
                 }
                 if self.is_live(chat_id, &run_id) {
+                    acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
                     // Working BEFORE the lastMessageAt bump: both ride the
                     // workspace doc from this one peer, so causal order makes it
                     // impossible for an observer to hold [new message, old status]
@@ -1039,6 +1048,7 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
+                    acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
@@ -1208,6 +1218,7 @@ impl SessionsEngine {
             },
             agent_tools,
         ));
+        acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
         Ok(run_id)
     }
 
@@ -1232,7 +1243,7 @@ impl SessionsEngine {
         let Some((run_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
-        let delivered_prompt = prepend_skill_notices(&self.inner.journal, chat_id, prompt);
+        let (delivered_prompt, skill_changes) = prepare_skill_notices(&self.inner.journal, chat_id, prompt);
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
             prompt: delivered_prompt.clone(),
@@ -1258,6 +1269,7 @@ impl SessionsEngine {
             self.note_turn_start(chat_id, &request.cwd);
         }
         if self.is_live(chat_id, &run_id) {
+            acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
             self.set_status(chat_id, SessionStatus::Working, false);
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
@@ -1275,6 +1287,7 @@ impl SessionsEngine {
         if reclaimed {
             return Ok(SteerOutcome::NotSteerable);
         }
+        acknowledge_skill_notices(&self.inner.journal, chat_id, &skill_changes);
         self.inner.note_message(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
     }
@@ -4126,6 +4139,43 @@ mod tests {
         assert_eq!(skill_read_paths(&mast_proto::ToolCall::Exec { command: "cat ~/.agents/skills/planner/SKILL.md".into() }, home), vec![expected]);
         assert!(skill_read_paths(&mast_proto::ToolCall::Exec { command: "cat ~/.agents/skills/planner/SKILL.md | head".into() }, home).is_empty());
         assert!(skill_read_paths(&mast_proto::ToolCall::ReadFile { path: "~/.agents/skills/../SKILL.md".into() }, home).is_empty());
+    }
+
+    #[tokio::test]
+    async fn skill_notice_waits_for_delivery_and_preserves_slash_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("planner");
+        std::fs::create_dir(&skill).unwrap();
+        let path = skill.join("SKILL.md");
+        std::fs::write(&path, "skill").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_times(std::fs::FileTimes::new().set_modified(base)).unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journal")).unwrap());
+        journal.record_skill_read("chat", &path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(base + std::time::Duration::from_secs(1))).unwrap();
+        let (slash, changes) = prepare_skill_notices(&journal, "chat", "/compact");
+        assert_eq!(slash, "/compact");
+        assert!(changes.is_empty());
+        let (prompt, changes) = prepare_skill_notices(&journal, "chat", "continue");
+        assert!(prompt.starts_with("planner skill changed since you loaded it; re-read it."));
+        let sessions = SessionsEngine::new("device".into(), journal.clone(), Arc::new(HarnessRegistry::new()));
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let (cancel, _) = watch::channel(false);
+        let (engine_tx, _) = mpsc::unbounded_channel();
+        lock(&sessions.inner.runs).insert("chat".into(), RunHandle {
+            run_id: "run".into(), steerable: true,
+            runtime_config: RuntimeConfig::from_request(HarnessId::Mock, &request()),
+            steer_tx: sender, interrupt_token: CancellationToken::new(), cancel, engine_tx,
+            pending_inputs: Arc::new(Mutex::new(HashMap::new())),
+            routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        });
+        assert_eq!(sessions.steer("chat", "continue", None).await.unwrap(), SteerOutcome::NotSteerable);
+        assert_eq!(prepare_skill_notices(&journal, "chat", "continue").1, changes);
+        assert!(prompt.contains("planner skill changed"));
+        acknowledge_skill_notices(&journal, "chat", &changes);
+        assert_eq!(prepare_skill_notices(&journal, "chat", "continue").0, "continue");
     }
 
     #[test]

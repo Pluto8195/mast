@@ -320,7 +320,7 @@ impl ArtifactQuestionSync {
             }
         }
 
-        let open = mast_proto::artifacts::open_unanswered(&questions, &current_answers);
+        let mut open = mast_proto::artifacts::open_unanswered(&questions, &current_answers);
 
         // Requests made by older versions remain usable until their own
         // questions are answered; no new per-question requests are created.
@@ -337,8 +337,17 @@ impl ArtifactQuestionSync {
             }
         }
 
+        // Existing legacy cards remain the source of their questions until
+        // resolved; do not introduce a second card for the same decisions.
+        let covered: std::collections::HashSet<String> = requests.iter().filter(|r| r.is_unresolved()).flat_map(|request| {
+            let key = request.dedupe_key.as_deref().unwrap_or_default();
+            if key == rollup_key(&artifact.id) { ids_in_info(request.info.as_deref().unwrap_or_default()) }
+            else { vec![key[prefix.len()..].to_ascii_uppercase()] }
+        }).collect();
+        open.retain(|question| !covered.contains(&question.id.to_ascii_uppercase()));
+
         let approvals: Vec<_> = snapshot.user_action_requests.iter()
-            .filter(|r| r.work_item_id == item && !r.deduped && r.dedupe_key.as_deref() == Some(approval_key.as_str()))
+            .filter(|r| r.work_item_id == item && !r.deduped && (r.dedupe_key.as_deref() == Some(approval_key.as_str()) || refers_to_plan_approval(r, &artifact)))
             .collect();
         let existing = approvals.iter().find(|r| r.is_open()).copied().or_else(|| {
             snapshot.user_action_requests.iter().find(|r| r.work_item_id == item && r.is_unresolved() && refers_to_plan_approval(r, &artifact))
@@ -353,6 +362,10 @@ impl ArtifactQuestionSync {
             if open.is_empty() && request.kind != Some(mast_proto::UserActionKind::Approve) && !refers_to_plan_approval(request, &artifact) {
                 changes += self.resolve(request, "No open questions left in the plan".to_owned()) as usize;
             } else {
+                let generated_count = request.text.split_once(' ').is_some_and(|(count, suffix)| {
+                    count.parse::<usize>().is_ok() && (suffix.starts_with("open question in ") || suffix.starts_with("open questions in "))
+                });
+                let text = if generated_count { text } else { request.text.clone() };
                 let info = approval_question_info(request.info.as_deref(), &artifact, sheet_revision, &open);
                 let mut updated = request.clone();
                 updated.dedupe_key = Some(approval_key.clone());
@@ -374,6 +387,7 @@ impl ArtifactQuestionSync {
                     let info = previous.info.as_deref().unwrap_or_default();
                     let plan_reopened = info.lines()
                         .find_map(|line| line.strip_prefix("Plan revision: ").and_then(|value| value.parse::<u32>().ok()))
+                        .or_else(|| previous.resolution.as_ref().and_then(|resolution| artifact.revisions.iter().find(|revision| revision.at <= resolution.at).map(|revision| revision.id)))
                         .filter(|revision| *revision < artifact.current_revision)
                         .is_some_and(|revision| open.iter().any(|q| self.artifacts.question_opened_at(&artifact, &q.id).0 > revision));
                     let sheet_reopened = sheet_revision.zip(info.lines().find_map(|line| line.strip_prefix("Sheet revision: ").and_then(|value| value.parse::<u32>().ok())))
@@ -408,13 +422,13 @@ impl ArtifactQuestionSync {
         let key = format!("artsheet:{}", artifact.id);
         let snapshot = self.outline.snapshot(&artifact.space_id);
         let requests: Vec<_> = snapshot.user_action_requests.iter()
-            .filter(|request| request.work_item_id == item && request.is_open() && request.dedupe_key.as_deref() == Some(key.as_str()))
+            .filter(|request| request.work_item_id == item && request.dedupe_key.as_deref() == Some(key.as_str()))
             .collect();
         let text = truncate(&format!("Decide {} open rows in {}", open.len(), one_line(&artifact.title)), user_action_limits::MAX_REQUEST_TEXT_CHARS);
         let info = format!("[Open sheet]({})\nRevision {}", artifact.url(), artifact.current_revision);
         let mut current = false;
         let mut changes = 0;
-        for request in requests {
+        for request in requests.iter().copied().filter(|request| request.is_open()) {
             if open.is_empty() {
                 changes += self.resolve(request, "No open rows left in the sheet".to_owned()) as usize;
             } else if !current && !request.deduped {
@@ -426,7 +440,11 @@ impl ArtifactQuestionSync {
                 }
             }
         }
-        if !open.is_empty() && !current {
+        let resolved: Vec<_> = requests.iter().filter(|request| !request.is_open()).collect();
+        let newest_revision = resolved.iter().filter_map(|request| request.info.as_deref().unwrap_or_default().lines()
+            .find_map(|line| line.strip_prefix("Revision ").and_then(|value| value.parse::<u32>().ok()))).max();
+        let newer_revision = resolved.is_empty() || newest_revision.is_some_and(|revision| artifact.current_revision > revision);
+        if !open.is_empty() && !current && newer_revision {
             changes += self.create(item, &self.origin_for(artifact), text, info, key) as usize;
         }
         changes
