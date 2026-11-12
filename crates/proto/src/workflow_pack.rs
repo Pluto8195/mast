@@ -368,6 +368,17 @@ impl WorkflowPack {
         }
         let mut scopes = std::collections::HashSet::new();
         for scope in &self.scopes {
+            if scope.instructions.len() > crate::work_outline::limits::MAX_INSTRUCTIONS_PER_SCOPE {
+                return Err("A workflow pack scope has too many instructions".into());
+            }
+            for instruction in &scope.instructions {
+                if instruction.trim().is_empty()
+                    || instruction.chars().count()
+                        > crate::work_outline::limits::MAX_INSTRUCTION_TEXT_CHARS
+                {
+                    return Err("A workflow pack instruction is empty or too long".into());
+                }
+            }
             if scope.item_path.iter().any(|part| part.trim().is_empty()) {
                 return Err("An item path contains an empty title".into());
             }
@@ -456,6 +467,26 @@ mod tests {
                 },
             }],
         };
+        assert!(pack.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_instruction_sizes_are_rejected() {
+        let mut pack = WorkflowPack {
+            format: WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![WorkflowPackScope {
+                item_path: vec![],
+                instructions: vec![" ".into()],
+            }],
+            templates: vec![],
+        };
+        assert!(pack.validate().is_err());
+        pack.scopes[0].instructions =
+            vec!["x".repeat(crate::work_outline::limits::MAX_INSTRUCTION_TEXT_CHARS + 1)];
+        assert!(pack.validate().is_err());
+        pack.scopes[0].instructions =
+            vec!["x".into(); crate::work_outline::limits::MAX_INSTRUCTIONS_PER_SCOPE + 1];
         assert!(pack.validate().is_err());
     }
 
