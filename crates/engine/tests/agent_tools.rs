@@ -1368,6 +1368,56 @@ async fn read_subtree_caps_its_output_and_says_so() {
     assert_eq!(read["tree"]["childrenOmitted"], 11);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn read_subtree_omits_completed_branches_and_preserves_requests() {
+    let rig = rig().await;
+    let root = create_item(&rig, "compact-root", "Coordinator", None).await;
+    for i in 0..170 {
+        let item = create_item(&rig, &format!("compact-create-{i}"), &format!("Completed work item {i} with a descriptive title"), Some(&root)).await;
+        update_item(&rig, &format!("compact-complete-{i}"), &item, json!({"status": "completed"})).await.unwrap();
+    }
+    let parent = create_item(&rig, "compact-parent", "Completed parent", Some(&root)).await;
+    let leaf = create_item(&rig, "compact-leaf", "Request", Some(&parent)).await;
+    update_item(&rig, "compact-parent-done", &parent, json!({"status": "completed"})).await.unwrap();
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op": "createUserActionRequest", "workItemId": leaf, "origin": {"chatId": OTHER_CHAT}, "text": "Review", "operationId": "compact-request"})).await.unwrap();
+    assign_chat(&rig, "compact-assign", CHAT, &root).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "compact-run", SPACE, &rig.core.device_id);
+    let compact = tool(&rig, lease.token(), "work_outline_read_subtree", json!({})).await.unwrap();
+    let full = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"includeCompleted": true})).await.unwrap();
+    assert_eq!(compact["itemCount"], 3);
+    assert_eq!(compact["tree"]["completedOmitted"], 170);
+    assert_eq!(compact["tree"]["children"][0]["children"][0]["openUserActionRequests"][0]["text"], "Review");
+    assert_eq!(full["itemCount"], 173);
+    assert_eq!(full["tree"]["completedOmitted"], 0);
+    let shallow = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"maxDepth": 0})).await.unwrap();
+    assert_eq!(shallow["tree"]["completedOmitted"], 170);
+    assert_eq!(shallow["tree"]["childrenOmitted"], 1);
+    let selected = tool(&rig, lease.token(), "work_outline_read_subtree", json!({"workItemId": parent})).await.unwrap();
+    assert_eq!(selected["tree"]["id"], parent);
+    let before = serde_json::to_vec(&full).unwrap().len();
+    let after = serde_json::to_vec(&compact).unwrap().len();
+    // Baseline for this 173-item fixture: 46,499 bytes before, 1,220 after.
+    println!("subtree fixture: {before} bytes before, {after} bytes after");
+    assert!(after * 4 < before, "before={before}, after={after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_subtree_preserves_completed_items_with_working_chats() {
+    let rig = rig().await;
+    let root = create_item(&rig, "working-root", "Coordinator", None).await;
+    let completed = create_item(&rig, "working-item", "Completed", Some(&root)).await;
+    update_item(&rig, "working-complete", &completed, json!({"status": "completed"})).await.unwrap();
+    assign_chat(&rig, "working-caller", CHAT, &root).await;
+    assign_chat(&rig, "working-worker", OTHER_CHAT, &completed).await;
+    rig.core.doc_host.queue_command(OTHER_CHAT, run_command("work", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.sessions.session_status(OTHER_CHAT).is_some_and(|s| s.status == mast_proto::SessionStatus::Working), "worker running").await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "working-run", SPACE, &rig.core.device_id);
+    let read = tool(&rig, lease.token(), "work_outline_read_subtree", json!({})).await.unwrap();
+    assert_eq!(read["tree"]["children"][0]["id"], completed);
+    assert_eq!(read["tree"]["children"][0]["chats"][0]["status"], "working");
+    rig.harness.release.notify_one();
+}
+
 // ---- bind_chat_worktree -----------------------------------------------------
 //
 // Real temp git repositories: a superproject with a `flagship` submodule, a
