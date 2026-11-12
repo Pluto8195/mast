@@ -74,6 +74,22 @@ pub fn preview_import(
     Ok((pack, scopes, templates))
 }
 
+/// Detect destination changes between a preview and a proposed application.
+/// The caller must additionally serialize the check with the registry writes.
+pub fn revalidate_import_preview(
+    pack: &WorkflowPack,
+    snapshot: &WorkOutlineSnapshot,
+    scopes: &[WorkflowPackScopePreview],
+    templates: &[WorkflowPackTemplatePreview],
+) -> Result<(), String> {
+    if preview_instruction_import(pack, snapshot)? != scopes
+        || preview_template_import(pack, snapshot)? != templates
+    {
+        return Err("The destination changed since the import preview".into());
+    }
+    Ok(())
+}
+
 /// Plan missing path components without changing the registry. IDs derive
 /// from the import operation and normalized paths so shared ancestors are
 /// created once. The caller must revalidate the destination before applying.
@@ -148,6 +164,49 @@ pub struct PlannedInstructionAddition {
     pub create: WorkOutlineMutation,
     pub undo: WorkOutlineMutation,
     pub expected_text: String,
+}
+
+/// Refuse an inverse if the imported instruction changed after application.
+/// The caller must check this against a fresh snapshot immediately before undo.
+pub fn guard_instruction_undo(
+    snapshot: &WorkOutlineSnapshot,
+    addition: &PlannedInstructionAddition,
+) -> Result<WorkOutlineMutation, String> {
+    let WorkOutlineMutation::CreateWorkItemInstruction(created) = &addition.create else {
+        return Err("Invalid instruction receipt".into());
+    };
+    let WorkOutlineMutation::ArchiveWorkItemInstruction(inverse) = &addition.undo else {
+        return Err("Invalid instruction inverse".into());
+    };
+    let expected_id = derive_id(
+        &created.operation_id,
+        mast_proto::work_outline::roles::INSTRUCTION,
+    );
+    if inverse.instruction_id != expected_id {
+        return Err("Instruction receipt does not match its inverse".into());
+    }
+    let instruction = snapshot
+        .instructions
+        .iter()
+        .find(|item| item.id == expected_id)
+        .ok_or("Imported instruction no longer exists")?;
+    let same_scope = match &created.scope {
+        mast_proto::InstructionScope::SpaceRoot => instruction.work_item_id.is_none(),
+        mast_proto::InstructionScope::WorkItem { work_item_id } => {
+            instruction.work_item_id.as_ref() == Some(work_item_id)
+        }
+    };
+    if instruction.archived()
+        || instruction.space_id != created.space_id
+        || !same_scope
+        || instruction.text != addition.expected_text
+        || instruction.text != created.text
+        || instruction.source.is_some()
+        || instruction.template_instruction_id.is_some()
+    {
+        return Err("Imported instruction changed since import".into());
+    }
+    Ok(addition.undo.clone())
 }
 
 /// Plan additions to empty scopes. Existing instructions require explicit
@@ -228,6 +287,30 @@ mod tests {
     }
 
     #[test]
+    fn import_preview_detects_destination_changes() {
+        let mut snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"space", "available":true, "synced":true
+        }))
+        .unwrap();
+        let pack = WorkflowPack {
+            format: mast_proto::workflow_pack::WORKFLOW_PACK_FORMAT.into(),
+            mode: WorkflowPackMode::Full,
+            scopes: vec![mast_proto::workflow_pack::WorkflowPackScope {
+                item_path: vec![],
+                instructions: vec!["Rule".into()],
+            }],
+            templates: vec![],
+        };
+        let scopes = preview_instruction_import(&pack, &snapshot).unwrap();
+        let templates = preview_template_import(&pack, &snapshot).unwrap();
+        assert!(revalidate_import_preview(&pack, &snapshot, &scopes, &templates).is_ok());
+        snapshot.instructions.push(
+            serde_json::from_value(serde_json::json!({"id":"local", "text":"Mine"})).unwrap(),
+        );
+        assert!(revalidate_import_preview(&pack, &snapshot, &scopes, &templates).is_err());
+    }
+
+    #[test]
     fn missing_paths_share_their_planned_ancestors() {
         let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
             "spaceId":"space", "available":true, "synced":true
@@ -305,5 +388,13 @@ mod tests {
                 mast_proto::work_outline::roles::INSTRUCTION
             )
         );
+        let mut after: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"space", "available":true, "synced":true,
+            "instructions":[{"id":undo.instruction_id,"spaceId":"space",
+                "workItemId":derive_id(&item.operation_id, mast_proto::work_outline::roles::ITEM), "text":"Rule"}]
+        })).unwrap();
+        assert!(guard_instruction_undo(&after, &additions[0]).is_ok());
+        after.instructions[0].text = "Edited".into();
+        assert!(guard_instruction_undo(&after, &additions[0]).is_err());
     }
 }
