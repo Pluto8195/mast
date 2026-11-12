@@ -2816,6 +2816,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn coordinator_tools_describe_compact_results() {
+        let mut definitions = catalog();
+        definitions.extend(work_outline_catalog());
+        let subtree = definitions.iter().find(|tool| tool.name == agent_tool_names::READ_SUBTREE).unwrap();
+        assert_eq!(subtree.input_schema["properties"]["includeCompleted"]["default"], false);
+        assert!(subtree.description.contains("completedOmitted"));
+        let report = definitions.iter().find(|tool| tool.name == "report_to_parent").unwrap();
+        for phrase in ["STATUS: done|progress|blocked|question", "RESULT", "NEXT", "5 lines", "do not restate"] {
+            assert!(report.description.contains(phrase), "missing {phrase}");
+        }
+        let create = definitions.iter().find(|tool| tool.name == "create_chat").unwrap();
+        assert!(create.description.contains("STATUS / RESULT / NEXT"));
+    }
+
     #[tokio::test]
     async fn chat_summaries_include_worker_blockers() {
         let world = Arc::new(World { working: true, ..World::default() });
