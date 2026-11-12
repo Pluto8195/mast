@@ -2007,6 +2007,16 @@ async fn first_guess_calls_succeed_or_say_exactly_what_to_pass() {
     .await
     .unwrap();
     assert_eq!(repeated["userActionRequestId"], request_id.as_str());
+    let updated = call(
+        "work_outline_create_user_action_request",
+        json!({ "request": "Which release branch?", "detail": "Choose one", "dedupeKey": "branch", "facts": [{"label":"Version", "value":"2"}] }),
+    ).await.unwrap();
+    assert_eq!(updated["userActionRequestId"], request_id.as_str());
+    let updated_snapshot = snapshot(&rig);
+    let updated_request = updated_snapshot.user_action_requests.iter().find(|r| r.id == request_id).unwrap();
+    assert_eq!(updated_request.text, "Which release branch?");
+    assert_eq!(updated_request.info.as_deref(), Some("Choose one"));
+    assert_eq!(updated_request.facts[0].value, "2");
     assert_eq!(
         snapshot(&rig)
             .user_action_requests

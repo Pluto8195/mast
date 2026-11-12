@@ -12,9 +12,8 @@
 //!   `artq:<artifactId>:<Q-n>`, text `Q-n: <question>`;
 //! - all other open questions roll up into one request, key
 //!   `artq:<artifactId>:rollup`, text `N open questions in <title>`, whose
-//!   `info` lists them one per line (`Q-n: text`). The request cannot be
-//!   edited, so a changed list resolves the old one ("Superseded") and
-//!   raises a new one;
+//!   `info` lists them one per line (`Q-n: text`). Changed content updates
+//!   the open request in place;
 //! - a question that is answered on the row, resolved or removed in the
 //!   document, or no longer open resolves its request (by the system actor);
 //! - a request a *person* resolved (Required Actions' Resolve or Reply &
@@ -361,12 +360,14 @@ impl ArtifactQuestionSync {
                     rollup_current = true;
                     continue;
                 }
-                let note = if rollup.is_empty() {
-                    self.why_resolved(&artifact, &questions, &answers, None)
-                } else {
-                    "Superseded: the list of open questions changed".to_owned()
-                };
-                changes += self.resolve(request, note) as usize;
+                if rollup.is_empty() {
+                    changes += self.resolve(request, self.why_resolved(&artifact, &questions, &answers, None)) as usize;
+                } else if !rollup_current && !request.deduped {
+                    changes += self.update(request, &origin,
+                        truncate(&rollup_text, user_action_limits::MAX_REQUEST_TEXT_CHARS),
+                        rollup_info_full.clone()) as usize;
+                    rollup_current = true;
+                }
             } else if !wanted_keys.contains(&key) {
                 let id = &key[prefix.len()..];
                 let note = self.why_resolved(&artifact, &questions, &answers, Some(id));
@@ -402,10 +403,15 @@ impl ArtifactQuestionSync {
         let mut current = false;
         let mut changes = 0;
         for request in requests {
-            if !open.is_empty() && request.text == text && request.info.as_deref() == Some(info.as_str()) && !current {
+            if open.is_empty() {
+                changes += self.resolve(request, "No open rows left in the sheet".to_owned()) as usize;
+            } else if !current && !request.deduped {
                 current = true;
-            } else {
-                changes += self.resolve(request, if open.is_empty() { "No open rows left in the sheet" } else { "Superseded: the open row count changed" }.to_owned()) as usize;
+                let origin = self.origin_for(artifact);
+                if request.text != text || request.info.as_deref() != Some(info.as_str())
+                    || request.chat_id != origin.chat_id || request.origin_kind != origin.kind {
+                    changes += self.update(request, &origin, text.clone(), info.clone()) as usize;
+                }
             }
         }
         if !open.is_empty() && !current {
@@ -513,6 +519,19 @@ impl ArtifactQuestionSync {
                 operation_id: derive_id(&operation_seed, "artq"),
             });
         self.apply(mutation)
+    }
+
+    fn update(&self, request: &UserActionRequestView, origin: &UserActionRequestOrigin, text: String, info: String) -> bool {
+        let update = mast_proto::UpdateUserActionRequestParams {
+            user_action_request_id: request.id.clone(),
+            request: CreateUserActionRequestParams {
+                work_item_id: request.work_item_id.clone(), origin: origin.clone(), text, info: Some(info),
+                dedupe_key: request.dedupe_key.clone(), operation_id: uuid::Uuid::new_v4().simple().to_string(),
+                options: request.options.clone(), links: request.links.clone(), facts: request.facts.clone(),
+                kind: request.kind, priority: request.priority,
+            },
+        };
+        self.apply(WorkOutlineMutation::UpdateUserActionRequest(update))
     }
 
     fn resolve(&self, request: &UserActionRequestView, note: String) -> bool {

@@ -2520,14 +2520,24 @@ async fn sheet_has_one_required_action_that_tracks_open_rows() {
     let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
     let open = || {
         mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE)
-            .user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).map(|r| r.text).collect::<Vec<_>>()
+            .user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).collect::<Vec<_>>()
     };
     sync.reconcile(id);
-    assert_eq!(open(), ["Decide 2 open rows in Sheet"]);
+    let first = open();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].text, "Decide 2 open rows in Sheet");
+    let request_id = first[0].id.clone();
     rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-2", "outcome":"decided"}]})).await.unwrap();
-    assert_eq!(open(), ["Decide 1 open rows in Sheet"]);
+    assert_eq!(open()[0].text, "Decide 1 open rows in Sheet");
+    assert_eq!(open()[0].id, request_id);
     rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId": id, "revision": 1, "decisions": [{"rowId":"D-4", "outcome":"rejected"}]})).await.unwrap();
     assert!(open().is_empty());
+    std::fs::write(&path, source.replace("Flow", "Updated flow")).unwrap();
+    publish(&rig, &rig.token, json!({"path": path, "title": "Sheet", "kind": "decision-sheet", "note": "reopen", "idempotencyKey": "sheet-action-reopen"})).await;
+    sync.reconcile(id);
+    assert_eq!(open().len(), 1);
+    assert_eq!(open()[0].text, "Decide 2 open rows in Sheet");
+    assert!(open()[0].info.as_deref().unwrap().contains("Revision 2"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

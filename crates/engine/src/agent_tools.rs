@@ -1768,8 +1768,7 @@ impl AgentToolsService {
             })?,
             None => context.operation_id(arguments)?,
         };
-        let mutation =
-            WorkOutlineMutation::CreateUserActionRequest(CreateUserActionRequestParams {
+        let request = CreateUserActionRequestParams {
                 options: args.options,
                 links: args.links,
                 facts: args.facts,
@@ -1791,7 +1790,29 @@ impl AgentToolsService {
                 info: non_empty(args.detail),
                 dedupe_key: non_empty(args.dedupe_key),
                 operation_id,
-            });
+            };
+        let existing = request.dedupe_key.as_ref().and_then(|key| {
+            snapshot.user_action_requests.iter().find(|r| r.is_unresolved()
+                && r.work_item_id == work_item_id && r.chat_id == context.grant.chat_id
+                && r.dedupe_key.as_ref() == Some(key))
+        });
+        let mutation = if let Some(existing) = existing {
+            if existing.text == request.text && existing.info == request.info
+                && existing.links == request.links && existing.facts == request.facts
+                && existing.options == request.options && existing.kind == Some(request.kind.unwrap_or_default())
+                && existing.priority == request.priority {
+                return Ok(json!({"userActionRequestId": existing.id, "workItemId": work_item_id, "warnings": warnings}));
+            }
+            let mut request = request;
+            if arguments.get("idempotencyKey").is_none() && arguments.get("idempotency_key").is_none() {
+                request.operation_id = uuid::Uuid::new_v4().simple().to_string();
+            }
+            WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams {
+                user_action_request_id: existing.id.clone(), request,
+            })
+        } else {
+            WorkOutlineMutation::CreateUserActionRequest(request)
+        };
         let reply = self.apply(context, &mutation)?;
         Ok(json!({
             "userActionRequestId": reply.user_action_request_id,

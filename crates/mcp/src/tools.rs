@@ -342,7 +342,7 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                     "options": { "type": "array", "items": { "type": "object", "required": ["id", "label"], "properties": { "id": { "type": "string", "maxLength": 120 }, "label": { "type": "string", "maxLength": 120 }, "detail": { "type": "string", "maxLength": 1000 } } } },
                     "facts": { "type": "array", "maxItems": 8, "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string", "maxLength": 40 }, "value": { "type": "string", "maxLength": 120 } } } },
                     "detail": { "type": "string" },
-                    "dedupeKey": { "type": "string", "description": "Equivalent open requests with the same key are not repeated. With a dedupeKey, idempotencyKey is optional." },
+                    "dedupeKey": { "type": "string", "description": "An open request raised by this chat with the same key is updated in place. With a dedupeKey, idempotencyKey is optional." },
                     "toolCallId": { "type": "string" },
                     "idempotencyKey": json!({
                         "type": "string",

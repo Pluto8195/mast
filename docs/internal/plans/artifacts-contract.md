@@ -198,9 +198,7 @@ Code: `crates/proto/src/artifacts/questions.rs`, `crates/engine/src/artifact_que
   - blocking open question → its own request, dedupe key `artq:<artifactId>:<Q-n>`, text
     `Q-n: <question>`, info = plan title/revision, `Blocks:` and the artifact link;
   - every other open question → one request, key `artq:<artifactId>:rollup`, text `N open
-    question(s) in <title>`, info lists `Q-n: text` per line. Requests cannot be edited, so a
-    changed list resolves the old request (system actor, note "Superseded: …") and raises a new
-    one;
+    question(s) in <title>`, info lists `Q-n: text` per line. A changed list updates the open request in place;
   - dedupe is by key across revisions; operation ids derive from (artifact, question, revision),
     so republishing never duplicates. A question removed, resolved in the document, answered, or
     no longer blocking resolves its request (system actor, note says why);

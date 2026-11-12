@@ -159,6 +159,10 @@ fn replay_reply(mutation: &WorkOutlineMutation) -> WorkOutlineMutateReply {
             user_action_request_id: Some(derive_id(&p.operation_id, roles::REQUEST)),
             ..Default::default()
         },
+        WorkOutlineMutation::UpdateUserActionRequest(p) => WorkOutlineMutateReply {
+            user_action_request_id: Some(p.user_action_request_id.clone()),
+            ..Default::default()
+        },
         WorkOutlineMutation::ProposeWorkItemInstruction(p) => WorkOutlineMutateReply {
             proposal_id: Some(derive_id(&p.operation_id, roles::PROPOSAL)),
             ..Default::default()
