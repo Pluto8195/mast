@@ -157,6 +157,60 @@ pub fn plan_missing_items(
     Ok(mutations)
 }
 
+/// Build an inverse only when a created item is still empty and unchanged.
+/// The check and write must be serialized with registry updates by the caller.
+pub fn guard_created_item_undo(
+    snapshot: &WorkOutlineSnapshot,
+    created: &CreateWorkItemParams,
+) -> Result<WorkOutlineMutation, String> {
+    let id = derive_id(&created.operation_id, mast_proto::work_outline::roles::ITEM);
+    let item = snapshot.item(&id).ok_or("Imported item no longer exists")?;
+    let has_children = snapshot.items.iter().any(|child| {
+        child.parent_work_item_id.as_deref() == Some(&id) && child.archived_at.is_none()
+    });
+    let has_instructions = snapshot.instructions.iter().any(|instruction| {
+        instruction.work_item_id.as_deref() == Some(&id) && !instruction.archived()
+    });
+    let has_requests = snapshot
+        .user_action_requests
+        .iter()
+        .any(|request| request.work_item_id == id);
+    let is_destination = snapshot
+        .items
+        .iter()
+        .any(|other| other.worker_destination_id.as_deref() == Some(&id));
+    if item.archived_at.is_some()
+        || item.space_id != created.space_id
+        || item.parent_work_item_id != created.parent_work_item_id
+        || item.title != created.title
+        || item.description != created.description
+        || item.status != created.status.unwrap_or_default()
+        || item.updated_at != item.created_at
+        || item.waiting_until.is_some()
+        || item.waiting_reason.is_some()
+        || item.is_project
+        || item.worker_destination_id.is_some()
+        || item.template_id.is_some()
+        || item.container_template.is_some()
+        || item.template_node_id.is_some()
+        || !item.chat_ids.is_empty()
+        || !item.external_reference_ids.is_empty()
+        || has_children
+        || has_instructions
+        || has_requests
+        || is_destination
+    {
+        return Err("Imported item changed or is no longer empty".into());
+    }
+    Ok(WorkOutlineMutation::ArchiveWorkItem(
+        mast_proto::ArchiveWorkItemParams {
+            work_item_id: id,
+            descendant_archive_policy: mast_proto::DescendantArchivePolicy::ArchiveDescendants,
+            operation_id: derive_id(&created.operation_id, "undo"),
+        },
+    ))
+}
+
 /// A reversible instruction addition. Undo must check that the instruction
 /// still has its imported text before archiving it.
 #[derive(Debug, Clone)]
@@ -348,6 +402,33 @@ mod tests {
             WorkOutlineMutation::CreateWorkItem(p) => p.operation_id.len() <= 64,
             _ => false,
         }));
+    }
+
+    #[test]
+    fn item_undo_refuses_an_added_child() {
+        let created = CreateWorkItemParams {
+            space_id: "space".into(),
+            parent_work_item_id: None,
+            placement: WorkOutlinePlacement::Last,
+            title: "Tasks".into(),
+            description: None,
+            status: None,
+            operation_id: "import".into(),
+        };
+        let id = derive_id(&created.operation_id, mast_proto::work_outline::roles::ITEM);
+        let mut snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"space", "available":true, "synced":true,
+            "items":[{"id":id, "spaceId":"space", "title":"Tasks"}]
+        }))
+        .unwrap();
+        assert!(guard_created_item_undo(&snapshot, &created).is_ok());
+        snapshot.items.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"child", "spaceId":"space", "title":"Added", "parentWorkItemId":id
+            }))
+            .unwrap(),
+        );
+        assert!(guard_created_item_undo(&snapshot, &created).is_err());
     }
 
     #[test]
