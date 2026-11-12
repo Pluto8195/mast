@@ -1464,7 +1464,7 @@ fn requests(rig: &Rig, artifact_id: &str) -> Vec<UserActionRequestView> {
         .filter(|r| {
             r.dedupe_key
                 .as_deref()
-                .is_some_and(|k| k.starts_with(&prefix))
+                .is_some_and(|k| k.starts_with(&prefix) || k == format!("artplan:{artifact_id}"))
         })
         .collect()
 }
@@ -1497,138 +1497,122 @@ async fn publish_plan(rig: &Rig, body: &str, key: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn blocking_questions_own_actions_and_the_rest_roll_up_without_duplicates() {
+async fn plan_approval_tracks_artifact_revision_in_place() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, "# Plan\n\nReady.", "approval-v1").await;
+    let create = |key: &str| json!({"request":"Approve plan", "kind":"approve", "dedupeKey":key,
+        "links":[{"label":"Plan", "target":{"type":"artifact", "id":id}}]});
+    let first = tool(&rig, &rig.token, "work_outline_create_user_action_request", create("first")).await.unwrap();
+    let request_id = first["userActionRequestId"].as_str().unwrap().to_owned();
+    publish_plan(&rig, "# Plan\n\nRevised.", "approval-v2").await;
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    sync.reconcile(&id);
+    let requests = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE).user_action_requests;
+    let card = requests.iter().find(|r| r.id == request_id).unwrap();
+    assert!(card.is_open());
+    assert!(card.info.as_deref().unwrap().contains("Plan revision: 2"));
+    let repeated = tool(&rig, &rig.token, "work_outline_create_user_action_request", create("different-key")).await.unwrap();
+    assert_eq!(repeated["userActionRequestId"], request_id);
+    assert_eq!(requests.iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artplan:{id}").as_str())).count(), 1);
+    tool(&rig, &rig.token, "work_outline_resolve_user_action_request", json!({"userActionRequestId":request_id, "resolution":"Approved"})).await.unwrap();
+    publish_plan(&rig, "# Plan\n\n> [!question] Q-1 · A new decision?\n", "approval-v3").await;
+    sync.reconcile(&id);
+    let requests = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone()).snapshot(SPACE).user_action_requests;
+    let approvals: Vec<_> = requests.iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artplan:{id}").as_str())).collect();
+    assert_eq!(approvals.len(), 1);
+    assert_ne!(approvals[0].id, request_id);
+    assert!(approvals[0].info.as_deref().unwrap().contains("Plan revision: 3"));
+    assert!(!requests.iter().any(|r| r.is_open() && r.dedupe_key.as_deref().is_some_and(|key| key.starts_with(&format!("artq:{id}:")))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_plan_approval_is_adopted_without_replacing_the_card() {
+    let rig = rig().await;
+    let id = publish_plan(&rig, "# Plan\n\nReady.", "legacy-approval-plan").await;
+    let outline = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone());
+    let item = artifact(&rig, &id).work_item_id.unwrap();
+    let params = mast_proto::CreateUserActionRequestParams {
+        work_item_id: item, origin: mast_proto::UserActionRequestOrigin { kind: mast_proto::UserActionOriginKind::Chat, chat_id: CHAT.into(), message_id: None, tool_call_id: None },
+        text: "Approve plan".into(), info: Some(format!("[Plan](mast-artifact:{id})")), dedupe_key: Some("approval-revision-1".into()),
+        operation_id: "legacy-plan-card".into(), options: vec![], links: vec![], facts: vec![],
+        kind: Some(mast_proto::UserActionKind::Approve), priority: None,
+    };
+    let reply = outline.mutate_as(&mast_proto::WorkOutlineMutation::CreateUserActionRequest(params), &outline.system_actor()).unwrap();
+    let request_id = reply.user_action_request_id.unwrap();
+    ArtifactQuestionSync::new(rig.core.artifacts.clone()).reconcile(&id);
+    let requests = outline.snapshot(SPACE).user_action_requests;
+    let card = requests.iter().find(|r| r.id == request_id).unwrap();
+    assert!(card.is_open());
+    assert_eq!(card.dedupe_key.as_deref(), Some(format!("artplan:{id}").as_str()));
+    assert!(card.info.as_deref().unwrap().contains("Plan revision: 1"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_questions_share_one_card_across_revisions() {
     let rig = rig().await;
     let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
     let id = publish_plan(&rig, PLAN_V1, "v1").await;
-    // The background sync reacts to the publish too; whichever pass writes
-    // first, passes are serialised, so after this one the state is complete.
     sync.reconcile(&id);
-    assert_eq!(
-        open_texts(&rig, &id),
-        ["2 open questions in Receiving plan", "Q-1: Merge by MPN?"]
-    );
     let all = requests(&rig, &id);
-    let blocking = all.iter().find(|r| r.text.starts_with("Q-1")).unwrap();
-    assert_eq!(
-        blocking.dedupe_key.as_deref(),
-        Some(question_key(&id, "Q-1").as_str())
-    );
-    // The publishing Chat is the origin, so Reply & resolve reaches it.
-    assert_eq!(blocking.chat_id, CHAT);
-    assert!(blocking.info.as_deref().unwrap().contains("Blocks: ENG-1"));
-    assert_eq!(
-        mast_proto::artifacts::artifact_links(blocking.info.as_deref().unwrap()).len(),
-        1
-    );
-    let rollup = all
-        .iter()
-        .find(|r| r.text.contains("open questions"))
-        .unwrap();
-    assert_eq!(rollup.dedupe_key.as_deref(), Some(rollup_key(&id).as_str()));
-    assert_eq!(
-        mast_proto::artifacts::artifact_links(rollup.info.as_deref().unwrap()).len(),
-        1
-    );
-    assert!(
-        rollup
-            .info
-            .as_deref()
-            .unwrap()
-            .contains("Q-2: Which timezone?")
-    );
-
-    // A pass with nothing changed writes nothing.
-    assert_eq!(sync.reconcile(&id), 0);
-    // Republishing the same plan does not duplicate either.
-    publish_plan(&rig, &format!("{PLAN_V1}\nMore prose.\n"), "v2").await;
-    assert_eq!(sync.reconcile(&id), 0);
-    assert_eq!(requests(&rig, &id).len(), 2);
-
-    // A new non-blocking question updates the roll-up (old one superseded).
-    let v3 = format!("{PLAN_V1}\n> [!question] Q-4 · Pallet size?\n");
-    publish_plan(&rig, &v3, "v3").await;
+    assert_eq!(all.len(), 1);
+    let card = &all[0];
+    assert_eq!(card.text, "3 open questions in Receiving plan");
+    assert_eq!(card.chat_id, CHAT);
+    let detail = card.info.as_deref().unwrap();
+    for question in ["Merge by MPN?", "Which timezone?", "Reel labels?"] {
+        assert!(detail.contains(question));
+    }
+    let request_id = card.id.clone();
+    let revision = format!("{PLAN_V1}\n> [!question] Q-4 · Pallet size?\n");
+    outline(&rig.client, json!({"op":"assignChatToWorkItem", "chatId":OTHER_CHAT, "workItemId":rig.item, "operationId":"assign-plan-owner"})).await;
+    std::fs::write(rig.worktree.join("plan.md"), &revision).unwrap();
+    let republished = publish(&rig, &rig.other_token, json!({"path":"plan.md", "title":"Receiving plan", "role":"plan", "pinAsPlan":true, "idempotencyKey":"v2"})).await;
+    assert_eq!(republished["artifactId"], id);
     sync.reconcile(&id);
-    assert_eq!(
-        open_texts(&rig, &id),
-        ["3 open questions in Receiving plan", "Q-1: Merge by MPN?"]
-    );
-    let superseded = requests(&rig, &id)
-        .into_iter()
-        .filter(|r| !r.is_open())
-        .collect::<Vec<_>>();
-    assert_eq!(superseded.len(), 1);
-    assert!(
-        superseded[0]
-            .resolution
-            .as_ref()
-            .unwrap()
-            .note
-            .as_deref()
-            .unwrap()
-            .starts_with("Superseded")
-    );
-
-    // Removing Q-1, and resolving Q-2 in the document, resolves their actions
-    // and shrinks the roll-up.
-    let v4 = "# Plan\n\n> [!question] Q-2 · Which timezone?\n> status: resolved\n> decision: UTC\n\n\
-              > [!question] Q-3 · Reel labels?\n\n> [!question] Q-4 · Pallet size?\n";
-    publish_plan(&rig, v4, "v4").await;
-    sync.reconcile(&id);
-    assert_eq!(
-        open_texts(&rig, &id),
-        ["2 open questions in Receiving plan"]
-    );
-    let q1 = requests(&rig, &id)
-        .into_iter()
-        .find(|r| r.text.starts_with("Q-1"))
-        .unwrap();
-    let note = q1.resolution.unwrap().note.unwrap();
-    assert!(note.contains("removed from the plan"), "{note}");
-
-    // No questions left: the roll-up resolves too.
-    publish_plan(&rig, "# Plan\n\nAll settled.\n", "v5").await;
+    let revised = requests(&rig, &id);
+    assert_eq!(revised.len(), 1);
+    assert_eq!(revised[0].id, request_id);
+    assert_eq!(revised[0].chat_id, OTHER_CHAT);
+    assert_eq!(revised[0].text, "4 open questions in Receiving plan");
+    assert!(revised[0].info.as_deref().unwrap().contains("Pallet size?"));
+    assert!(revised[0].info.as_deref().unwrap().contains("Plan revision: 2"));
+    publish_plan(&rig, "# Plan\n\nAll settled.\n", "v3").await;
     sync.reconcile(&id);
     assert!(open_texts(&rig, &id).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn recreating_a_request_with_a_changed_origin_gets_a_new_operation_id() {
-    use mast_proto::ResolveUserActionRequestParams;
-    use mast_proto::work_outline::WorkOutlineMutation;
+async fn plan_card_reply_does_not_answer_individual_questions() {
     let rig = rig().await;
     let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
     let id = publish_plan(&rig, PLAN_V1, "v1").await;
     sync.reconcile(&id);
-    let outline = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone());
-    let actor = outline.system_actor();
-    let q1 = requests(&rig, &id)
-        .into_iter()
-        .find(|r| r.text.starts_with("Q-1"))
-        .unwrap();
-    outline
-        .mutate_as(
-            &WorkOutlineMutation::ResolveUserActionRequest(ResolveUserActionRequestParams {
-                outcome: None,
-                values: None,
-                via: None,
-                user_action_request_id: q1.id.clone(),
-                note: Some("closed by the system".into()),
-                answer: None,
-                operation_id: "test-close-q1".into(),
-            }),
-            &actor,
-        )
-        .unwrap();
-    // The publishing chat goes away, so the next request has another origin
-    // but the same artifact, question and revision.
-    rig.core.workspace.set_chat_archived(CHAT, true).unwrap();
-    assert!(
-        sync.reconcile(&id) > 0,
-        "the changed request must be written"
-    );
-    let open = open_texts(&rig, &id);
-    assert!(open.contains(&"Q-1: Merge by MPN?".to_owned()), "{open:?}");
+    let card = requests(&rig, &id).into_iter().find(|r| r.is_open()).unwrap();
+    outline(&rig.client, json!({"op":"resolveUserActionRequest", "userActionRequestId":card.id,
+        "note":"Please reconsider the options", "operationId":"plan-card-reply"})).await;
+    sync.reconcile(&id);
+    assert!(artifact(&rig, &id).answers.is_empty());
+    assert!(open_texts(&rig, &id).is_empty());
+    assert_eq!(sync.reconcile(&id), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answered_plan_question_reopens_after_a_resolved_revision() {
+    let rig = rig().await;
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    let question = "# Plan\n\n> [!question] Q-1 · Choose a timezone?\n";
+    let id = publish_plan(&rig, question, "reopen-v1").await;
+    sync.reconcile(&id);
+    rig.client.call(methods::ARTIFACT_ANSWER_QUESTION,
+        json!({"artifactId":id, "questionId":"Q-1", "answer":"UTC"})).await.unwrap();
+    sync.reconcile(&id);
+    assert!(open_texts(&rig, &id).is_empty());
+    publish_plan(&rig, "# Plan\n\n> [!question] Q-1 · Choose a timezone?\n> status: resolved\n> decision: UTC\n", "reopen-v2").await;
+    publish_plan(&rig, question, "reopen-v3").await;
+    sync.reconcile(&id);
+    assert_eq!(open_texts(&rig, &id), ["1 open question in Receiving plan"]);
+    let plan = tool(&rig, &rig.token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(plan["answeredQuestions"], json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1654,17 +1638,6 @@ async fn answering_in_the_card_resolves_the_action_and_reaches_the_agent() {
     assert_eq!(
         open_texts(&rig, &id),
         ["2 open questions in Receiving plan"]
-    );
-    let q1 = requests(&rig, &id)
-        .into_iter()
-        .find(|r| r.text.starts_with("Q-1"))
-        .unwrap();
-    assert!(
-        q1.resolution
-            .unwrap()
-            .note
-            .unwrap()
-            .starts_with("Answered in Mast: By MPN")
     );
 
     // Answering a rolled-up question shrinks the roll-up.
@@ -1705,12 +1678,19 @@ async fn resolving_the_action_marks_the_question_answered() {
     let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
     let id = publish_plan(&rig, PLAN_V1, "v1").await;
     sync.reconcile(&id);
+    for (key, text, info, op) in [
+        (question_key(&id, "Q-1"), "Q-1: Merge by MPN?", "", "legacy-q1"),
+        (rollup_key(&id), "2 open questions", "Q-2: Which timezone?\nQ-3: Reel labels?", "legacy-rollup"),
+    ] {
+        outline(&rig.client, json!({"op":"createUserActionRequest", "workItemId":rig.item,
+            "origin":{"kind":"chat", "chatId":CHAT}, "text":text, "info":info,
+            "dedupeKey":key, "operationId":op})).await;
+    }
+    sync.reconcile(&id);
     let all = requests(&rig, &id);
-    let blocking = all.iter().find(|r| r.text.starts_with("Q-1")).unwrap();
-    let rollup = all
-        .iter()
-        .find(|r| r.text.contains("open questions"))
-        .unwrap();
+    let blocking = all.iter().find(|r| r.dedupe_key.as_deref() == Some(question_key(&id, "Q-1").as_str())).unwrap();
+    let rollup = all.iter().find(|r| r.dedupe_key.as_deref() == Some(rollup_key(&id).as_str())).unwrap();
+    assert!(blocking.is_open() && rollup.is_open());
 
     outline(
         &rig.client,
@@ -1727,7 +1707,7 @@ async fn resolving_the_action_marks_the_question_answered() {
     );
     assert_eq!(
         open_texts(&rig, &id),
-        ["2 open questions in Receiving plan"]
+        ["2 open questions", "2 open questions in Receiving plan"]
     );
 
     // Resolving the roll-up (no note) answers every question it listed.
@@ -1893,7 +1873,7 @@ async fn picking_resolves_the_linked_question_and_artopt_requests() {
     let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
     let plan = publish_plan(&rig, PLAN_V1, "v1").await;
     sync.reconcile(&plan);
-    assert!(open_texts(&rig, &plan).contains(&"Q-1: Merge by MPN?".to_owned()));
+    assert_eq!(open_texts(&rig, &plan), ["3 open questions in Receiving plan"]);
     let id = publish_options(&rig, "Q-1", "o1").await;
     // An agent-raised request about the choice itself.
     outline(
@@ -1917,7 +1897,7 @@ async fn picking_resolves_the_linked_question_and_artopt_requests() {
 
     pick(&rig, &id, Some("A"), "Dense", None).await;
     assert!(!outline_open().contains(&"Pick a layout".to_owned()));
-    assert!(!open_texts(&rig, &plan).contains(&"Q-1: Merge by MPN?".to_owned()));
+    assert_eq!(open_texts(&rig, &plan), ["2 open questions in Receiving plan"]);
     let answer = artifact(&rig, &plan).answer_of("Q-1").unwrap().clone();
     assert_eq!(answer.answer, "Picked option A: Dense");
 
@@ -2209,7 +2189,7 @@ async fn publishing_and_resolving_trigger_the_background_sync_without_a_tick() {
     // the 5 minute safety sweep is far outside this deadline.
     let id = publish_plan(&rig, PLAN_V1, "v1").await;
     let started = std::time::Instant::now();
-    while open_texts(&rig, &id).len() < 2 {
+    while open_texts(&rig, &id).is_empty() {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "no event-driven pass"
@@ -2218,7 +2198,7 @@ async fn publishing_and_resolving_trigger_the_background_sync_without_a_tick() {
     }
     assert_eq!(
         open_texts(&rig, &id),
-        ["2 open questions in Receiving plan", "Q-1: Merge by MPN?"]
+        ["3 open questions in Receiving plan"]
     );
     // Dropping every question resolves the requests on the next event.
     publish_plan(&rig, "# Plan\n\nAll settled.\n", "v2").await;
@@ -2541,6 +2521,29 @@ async fn sheet_has_one_required_action_that_tracks_open_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sheet_republication_updates_the_same_open_card() {
+    let rig = rig().await;
+    let path = rig.worktree.join("sheet.json");
+    let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#;
+    std::fs::write(&path, source).unwrap();
+    let args = |key: &str| json!({"path":path,"title":"Sheet","kind":"decision-sheet","note":"test","idempotencyKey":key});
+    let first = publish(&rig, &rig.token, args("sheet-republish-1")).await;
+    let id = first["artifactId"].as_str().unwrap();
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    let outline = mast_engine::work_outline::WorkOutlineService::new(rig.core.workspace.clone());
+    sync.reconcile(id);
+    let cards = || outline.snapshot(SPACE).user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).collect::<Vec<_>>();
+    let card_id = cards()[0].id.clone();
+    std::fs::write(&path, source.replace("Proceed?", "Proceed now?")).unwrap();
+    publish(&rig, &rig.token, args("sheet-republish-2")).await;
+    sync.reconcile(id);
+    let cards = cards();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].id, card_id);
+    assert!(cards[0].info.as_deref().unwrap().contains("Revision 2"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn plan_answers_are_recorded_as_one_batch() {
     let rig = rig().await;
     let id = publish_plan(&rig, PLAN_V1, "v1").await;
@@ -2574,6 +2577,12 @@ async fn structured_plan_publish_and_get_round_trip() {
         fetched["plan"],
         serde_json::from_str::<Value>(source).unwrap()
     );
+    assert_eq!(fetched["openQuestions"], 1);
+    let id = first["artifactId"].as_str().unwrap();
+    ArtifactQuestionSync::new(rig.core.artifacts.clone()).reconcile(id);
+    let cards = requests(&rig, id);
+    assert_eq!(cards.iter().filter(|card| card.is_open()).count(), 1);
+    assert!(cards.iter().any(|card| card.is_open() && card.info.as_deref().unwrap().contains("Should filters be included?")));
     let mut invalid: Value = serde_json::from_str(source).unwrap();
     invalid["tickets"][0]["goal"] = json!("");
     std::fs::write(&path, invalid.to_string()).unwrap();
@@ -2597,4 +2606,32 @@ async fn structured_plan_validates_readable_sheet_rows() {
     std::fs::write(&path, plan.to_string()).unwrap();
     let error = tool(&rig, &rig.token, "artifact_publish", json!({"path":path,"title":"Plan","kind":"plan","idempotencyKey":"invalid-plan-sheet"})).await.unwrap_err();
     assert!(error.contains("tickets[0].behavior[0].row"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn structured_plan_card_tracks_its_sheet_decision() {
+    let rig = rig().await;
+    let sheet_path = rig.worktree.join("linked-sheet.json");
+    std::fs::write(&sheet_path, r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Proceed","question":"Proceed?","steps":[]}]}"#).unwrap();
+    let sheet = publish(&rig, &rig.token, json!({"path":sheet_path,"title":"Sheet","kind":"decision-sheet","idempotencyKey":"linked-sheet"})).await;
+    let sheet_id = sheet["artifactId"].as_str().unwrap();
+    let plan_path = rig.worktree.join("linked-plan.json");
+    let plan = json!({"kind":"plan", "title":"Plan", "summary":"Summary", "sheet":{"ref":format!("mast-artifact:{sheet_id}"),"rev":1},
+        "questions":[{"id":"Q-1","text":"Proceed?","row":"D-2","blocking":true,"blocks":[],"example":null}]});
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path":plan_path,"title":"Plan","kind":"plan","role":"plan","pinAsPlan":true,"idempotencyKey":"linked-plan"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let sync = ArtifactQuestionSync::new(rig.core.artifacts.clone());
+    sync.reconcile(id);
+    assert_eq!(open_texts(&rig, id), ["1 open question in Plan"]);
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, json!({"artifactId":sheet_id,"revision":1,"decisions":[{"rowId":"D-2","outcome":"decided"}]})).await.unwrap();
+    sync.reconcile(id);
+    assert!(open_texts(&rig, id).is_empty());
+    let fetched = tool(&rig, &rig.token, "artifact_get_plan", json!({})).await.unwrap();
+    assert_eq!(fetched["openQuestions"], 0);
+    let revised = std::fs::read_to_string(&sheet_path).unwrap().replace("Proceed?", "Proceed now?");
+    std::fs::write(&sheet_path, revised).unwrap();
+    publish(&rig, &rig.token, json!({"path":sheet_path,"title":"Sheet","kind":"decision-sheet","idempotencyKey":"linked-sheet-v2"})).await;
+    sync.reconcile(id);
+    assert_eq!(open_texts(&rig, id), ["1 open question in Plan"]);
 }

@@ -8,9 +8,10 @@
 //! clock observation, size gate, one batch per logical mutation):
 //!
 //! - requests: id `derive_id(operationId, "request")`; `spaceId`,
-//!   `workItemId`, `chatId`, `messageId`, `toolCallId`, `text`, `info`,
-//!   `dedupeKey`, `createdBy`, `createdAt`, `inputsHash` are written once by
-//!   the create upsert, with `state: "open"`. Resolution is ONE op writing
+//!   `workItemId`, `dedupeKey`, `createdBy`, `createdAt`, `inputsHash` are
+//!   fixed at creation, except that the system can migrate an artifact key.
+//!   Open requests may update content and origin.
+//!   Resolution is ONE op writing
 //!   `state: "resolved"` and the ONE-field `resolution {by, at, note?}`; no
 //!   op ever writes `open` again, and the reader treats a present resolution
 //!   as resolved, so resolution is monotone. Resolving a request resolves
@@ -707,20 +708,36 @@ impl RegistryDoc {
     pub fn update_user_action_request(
         &mut self,
         p: &mast_proto::UpdateUserActionRequestParams,
+        actor: &WorkOutlineActor,
     ) -> Outcome<()> {
         check_operation_id(&p.request.operation_id)?;
         validate_request_content(&p.request)?;
         let request = self.user_action_request(&p.user_action_request_id)
             .ok_or_else(|| not_found("Request not found"))?;
         if !request.is_open() || request.work_item_id != p.request.work_item_id
-            || request.dedupe_key != p.request.dedupe_key {
+            || (request.dedupe_key != p.request.dedupe_key && actor.kind != WorkOutlineActorKind::System) {
             return Err(invalid("Request is resolved or does not match its key and work item"));
+        }
+        check_origin_id("message", p.request.origin.message_id.as_deref())?;
+        check_origin_id("tool call", p.request.origin.tool_call_id.as_deref())?;
+        match p.request.origin.kind {
+            UserActionOriginKind::System if !p.request.origin.chat_id.is_empty()
+                || p.request.origin.message_id.is_some() || p.request.origin.tool_call_id.is_some() => return Err(invalid("A system request has no origin Chat")),
+            UserActionOriginKind::Chat => {
+                check_id("origin Chat", &p.request.origin.chat_id)?;
+                let chat = self.chat(&p.request.origin.chat_id).ok().flatten().ok_or_else(|| not_found("The origin Chat was not found"))?;
+                if chat.space_id.as_deref() != Some(request.space_id.as_str()) {
+                    return Err(err(WorkOutlineErrorCode::CrossSpace, "The origin Chat belongs to another Space"));
+                }
+            }
+            _ => {}
         }
         let set = BTreeMap::from([
             ("chatId".to_owned(), json!(p.request.origin.chat_id)),
             ("originKind".to_owned(), json!(p.request.origin.kind)),
             ("messageId".to_owned(), json!(p.request.origin.message_id)),
             ("toolCallId".to_owned(), json!(p.request.origin.tool_call_id)),
+            ("dedupeKey".to_owned(), json!(p.request.dedupe_key)),
             ("text".to_owned(), json!(p.request.text)),
             ("info".to_owned(), json!(p.request.info)),
             ("options".to_owned(), json!(p.request.options)),
@@ -1915,7 +1932,7 @@ impl RegistryDoc {
             WorkOutlineMutation::UpdateUserActionRequest(p) => {
                 let request = self.user_action_request(&p.user_action_request_id)
                     .ok_or_else(|| not_found("Request not found"))?;
-                if request.chat_id != chat_id || p.request.origin.chat_id != chat_id || request.work_item_id != require_assigned()? {
+                if request.chat_id != chat_id || p.request.origin.kind != UserActionOriginKind::Chat || p.request.origin.chat_id != chat_id || request.work_item_id != require_assigned()? {
                     return Err(unauthorized("Agents may only update requests raised by their own Chat"));
                 }
                 Ok(())

@@ -870,7 +870,7 @@ impl RegistryDoc {
                 })
             }
             WorkOutlineMutation::UpdateUserActionRequest(p) => {
-                self.update_user_action_request(p)?;
+                self.update_user_action_request(p, actor)?;
                 Ok(WorkOutlineMutateReply { user_action_request_id: Some(p.user_action_request_id.clone()), ..Default::default() })
             }
             WorkOutlineMutation::ResolveUserActionRequest(p) => self

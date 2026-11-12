@@ -970,7 +970,7 @@ impl SessionsEngine {
             plan.resume = None;
             plan.transition = InstructionTransition::Fresh;
         }
-        request.prompt = prepend_skill_notices(&self.inner.journal, chat_id, &request.prompt);
+        let delivered_prompt = prepend_skill_notices(&self.inner.journal, chat_id, &request.prompt);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -989,12 +989,12 @@ impl SessionsEngine {
                 // Register acceptance before a fast boundary can retire it.
                 let mut pending = lock(&ledger);
                 let message = SteerMessage {
-                    prompt: request.prompt.clone(),
+                    prompt: delivered_prompt.clone(),
                     message_id: Some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
                     pending.push_back(RoutedSteer {
-                        prompt: request.prompt.clone(),
+                        prompt: delivered_prompt.clone(),
                         message_id: user_id.clone(),
                     });
                     true
@@ -1111,6 +1111,7 @@ impl SessionsEngine {
             resume_injected = request.resume.is_some();
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+        let original_prompt = std::mem::replace(&mut request.prompt, delivered_prompt);
 
         let run_id = new_id();
         let agent_tools = self.agent_tools_for(chat_id, &run_id, harness.as_ref());
@@ -1178,7 +1179,7 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        self.inner.note_message(chat_id, &original_prompt);
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
@@ -1186,7 +1187,7 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(chat_id, harness_id, &original_prompt, &request.cwd);
         }
 
         tokio::spawn(drive_run(
@@ -1231,11 +1232,10 @@ impl SessionsEngine {
         let Some((run_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
-        let prompt = prepend_skill_notices(&self.inner.journal, chat_id, prompt);
-        let prompt = prompt.as_str();
+        let delivered_prompt = prepend_skill_notices(&self.inner.journal, chat_id, prompt);
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
-            prompt: prompt.to_string(),
+            prompt: delivered_prompt.clone(),
             message_id: Some(user_id.clone()),
         };
         {
@@ -1246,7 +1246,7 @@ impl SessionsEngine {
                 return Ok(SteerOutcome::NotSteerable);
             }
             pending.push_back(RoutedSteer {
-                prompt: prompt.to_string(),
+                prompt: delivered_prompt,
                 message_id: user_id.clone(),
             });
         }
@@ -3525,8 +3525,10 @@ async fn drive_run(
         if let Some(workspace) = inner.workspace() {
             match &event {
                 AgentEvent::ToolCall { id, call } => {
-                    if skill_read_tools.insert(id.clone()) {
-                        for path in skill_read_paths(call, &crate::repos::home_dir()) {
+                    if !skill_read_tools.contains(id) {
+                        let paths = skill_read_paths(call, &crate::repos::home_dir());
+                        if !paths.is_empty() { skill_read_tools.insert(id.clone()); }
+                        for path in paths {
                             if let Err(error) = inner.journal.record_skill_read(&chat_id, &path) {
                                 tracing::warn!(%error, "could not record skill read");
                             }

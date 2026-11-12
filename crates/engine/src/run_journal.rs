@@ -111,19 +111,19 @@ impl RunJournal {
     }
 
     pub fn skill_change_notices(&self, chat_id: &str) -> Result<Vec<String>, JournalError> {
-        let mut notices = Vec::new();
+        let mut notices = std::collections::BTreeSet::new();
         self.update_instruction_sidecar(chat_id, |sidecar| {
             for (path, observed) in &mut sidecar.skill_mtimes {
                 if let Some(mtime) = skill_mtime(path) && mtime > *observed {
                     if let Some(name) = path.parent().and_then(Path::file_name).and_then(|s| s.to_str()) {
-                        notices.push(format!("{name} skill changed since you loaded it; re-read it."));
+                        notices.insert(format!("{name} skill changed since you loaded it; re-read it."));
                         *observed = mtime;
                     }
                 }
             }
             !notices.is_empty()
         })?;
-        Ok(notices)
+        Ok(notices.into_iter().collect())
     }
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, JournalError> {
         let dir = dir.as_ref().to_path_buf();

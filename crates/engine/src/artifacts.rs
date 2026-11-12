@@ -439,6 +439,18 @@ fn render_path_kind(path: &Path, bytes: &[u8]) -> ArtifactKind {
     ArtifactKind::from_path(&path.to_string_lossy())
 }
 
+fn extract_plan_questions(kind: ArtifactKind, source: &str) -> Vec<mast_proto::PlanQuestion> {
+    if kind != ArtifactKind::Plan {
+        return mast_proto::extract_questions(kind, source);
+    }
+    mast_proto::plan::Plan::parse(source).ok().and_then(|plan| plan.questions).unwrap_or_default()
+        .into_iter().map(|question| mast_proto::PlanQuestion {
+            id: question.id.to_ascii_uppercase(), text: question.text, blocking: question.blocking,
+            status: mast_proto::PlanQuestionStatus::Open,
+            blocks: (!question.blocks.is_empty()).then(|| question.blocks.join(", ")),
+        }).collect()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderCheckArgs {
@@ -1472,6 +1484,32 @@ impl ArtifactsService {
         let Some(current) = artifact.current() else {
             return Vec::new();
         };
+        // Structured plan questions refer to sheet rows. Their state can
+        // change without a plan revision, so do not use the plan-hash cache.
+        if artifact.kind == ArtifactKind::Plan {
+            let bytes = std::fs::read(self.snapshot_path(&artifact.id, &current.hash))
+                .ok().or_else(|| self.current_bytes(artifact).ok()).unwrap_or_default();
+            let source = String::from_utf8_lossy(&bytes);
+            let mut questions = extract_plan_questions(artifact.kind, &source);
+            if let Ok(plan) = mast_proto::plan::Plan::parse(&source)
+                && let Some(reference) = plan.sheet.as_ref().and_then(|sheet| mast_proto::artifacts::strip_artifact_scheme(&sheet.r#ref))
+                && let Some(sheet) = self.workspace().artifact(reference)
+                && sheet.space_id == artifact.space_id && sheet.work_item_id == artifact.work_item_id
+                && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none()
+                && let Ok(bytes) = self.current_bytes(&sheet)
+                && let Ok(text) = std::str::from_utf8(&bytes)
+                && let Ok(document) = mast_proto::decision_sheet::DecisionSheet::parse(text) {
+                let rows = document.decision_rows();
+                for (question, source) in questions.iter_mut().zip(plan.questions.unwrap_or_default()) {
+                    if rows.iter().find(|row| row.id == source.row).is_some_and(|row| {
+                        row.status.state != "open" || sheet.decisions.iter().any(|decision| decision.row_id == row.id && decision.revision == sheet.current_revision)
+                    }) {
+                        question.status = mast_proto::PlanQuestionStatus::Resolved;
+                    }
+                }
+            }
+            return questions;
+        }
         if let Some((hash, questions)) = lock(&self.inner.questions).get(&artifact.id)
             && *hash == current.hash
         {
@@ -1481,13 +1519,66 @@ impl ArtifactsService {
             .ok()
             .or_else(|| self.current_bytes(artifact).ok())
             .unwrap_or_default();
-        let questions =
-            mast_proto::extract_questions(artifact.kind, &String::from_utf8_lossy(&bytes));
+        let questions = extract_plan_questions(artifact.kind, &String::from_utf8_lossy(&bytes));
         lock(&self.inner.questions).insert(
             artifact.id.clone(),
             (current.hash.clone(), questions.clone()),
         );
         questions
+    }
+
+    pub(crate) fn plan_questions_at_revision(&self, artifact: &ArtifactView, revision: u32) -> Option<Vec<mast_proto::PlanQuestion>> {
+        let revision = artifact.revisions.iter().find(|entry| entry.id == revision)?;
+        let bytes = std::fs::read(self.snapshot_path(&artifact.id, &revision.hash)).ok()?;
+        Some(extract_plan_questions(artifact.kind, &String::from_utf8_lossy(&bytes)))
+    }
+
+    pub(crate) fn plan_sheet_revision(&self, artifact: &ArtifactView) -> Option<u32> {
+        if artifact.kind != ArtifactKind::Plan { return None; }
+        let bytes = self.current_bytes(artifact).ok()?;
+        let plan = mast_proto::plan::Plan::parse(std::str::from_utf8(&bytes).ok()?).ok()?;
+        let reference = plan.sheet?.r#ref;
+        let id = mast_proto::artifacts::strip_artifact_scheme(&reference)?;
+        let sheet = self.workspace().artifact(id)?;
+        (sheet.space_id == artifact.space_id && sheet.work_item_id == artifact.work_item_id
+            && sheet.kind == ArtifactKind::DecisionSheet && sheet.archived_at.is_none()).then_some(sheet.current_revision)
+    }
+
+    /// Start of the current uninterrupted open interval for a question.
+    pub(crate) fn question_opened_at(&self, artifact: &ArtifactView, id: &str) -> (u32, i64) {
+        let mut start = (artifact.current_revision, artifact.current().map_or(artifact.created_at, |revision| revision.at));
+        let mut boundary = false;
+        for revision in &artifact.revisions {
+            let Some(questions) = self.plan_questions_at_revision(artifact, revision.id) else { return (1, artifact.created_at); };
+            if !questions.iter().any(|question| question.id.eq_ignore_ascii_case(id)
+                && question.status == mast_proto::PlanQuestionStatus::Open) { boundary = true; break; }
+            start = (revision.id, revision.at);
+        }
+        if !boundary && artifact.revisions.last().is_none_or(|revision| revision.id > 1) {
+            return (1, artifact.created_at);
+        }
+        start
+    }
+
+    pub(crate) fn current_plan_answers(&self, artifact: &ArtifactView) -> Vec<mast_proto::ArtifactQuestionAnswer> {
+        let mut starts: std::collections::HashMap<String, u32> = artifact.answers.iter()
+            .map(|answer| (answer.id.to_ascii_uppercase(), artifact.current_revision)).collect();
+        let mut pending: std::collections::HashSet<String> = starts.keys().cloned().collect();
+        let mut incomplete = artifact.revisions.is_empty();
+        for revision in &artifact.revisions {
+            if pending.is_empty() { break; }
+            let Some(questions) = self.plan_questions_at_revision(artifact, revision.id) else { incomplete = true; break; };
+            pending.retain(|id| {
+                if questions.iter().any(|q| q.id.eq_ignore_ascii_case(id) && q.status == mast_proto::PlanQuestionStatus::Open) {
+                    starts.insert(id.clone(), revision.id);
+                    true
+                } else { false }
+            });
+        }
+        if incomplete || artifact.revisions.last().is_some_and(|revision| revision.id > 1) {
+            for id in &pending { starts.insert(id.clone(), 1); }
+        }
+        artifact.answers.iter().filter(|answer| answer.revision >= starts[&answer.id.to_ascii_uppercase()]).cloned().collect()
     }
 
     /// `ArtifactDrift`: commits made after the artifact's latest revision on
@@ -2643,10 +2734,15 @@ impl ArtifactsService {
             None
         };
         let content = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
-        let (open_questions, unverified_claims) = content
+        let (mut open_questions, unverified_claims) = content
             .as_deref()
             .map(|text| (count_open_questions(text), count_unverified_claims(text)))
             .unwrap_or((0, 0));
+        let parsed_questions = if content.is_some() { self.plan_questions(&plan) } else { Vec::new() };
+        let current_answers = if content.is_some() { self.current_plan_answers(&plan) } else { plan.answers.clone() };
+        if plan.kind == ArtifactKind::Plan && content.is_some() {
+            open_questions = mast_proto::artifacts::open_unanswered(&parsed_questions, &current_answers).len() as u32;
+        }
         Ok(json!({
             "artifactId": plan.id,
             "title": plan.title,
@@ -2658,7 +2754,10 @@ impl ArtifactsService {
             "content": content,
             "openQuestions": open_questions,
             "unverifiedClaims": unverified_claims,
-            "answeredQuestions": plan.answers.iter().map(|a| json!({
+            "answeredQuestions": plan.answers.iter().filter(|answer| {
+                !parsed_questions.iter().any(|q| q.id.eq_ignore_ascii_case(&answer.id) && q.status == mast_proto::PlanQuestionStatus::Open)
+                    || current_answers.iter().any(|a| a.id.eq_ignore_ascii_case(&answer.id) && a.revision == answer.revision)
+            }).map(|a| json!({
                 "id": a.id, "answer": a.answer, "at": a.at, "revision": a.revision,
             })).collect::<Vec<_>>(),
             "decisions": plan.decisions,
