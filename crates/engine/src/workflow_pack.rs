@@ -141,6 +141,80 @@ pub fn plan_missing_items(
     Ok(mutations)
 }
 
+/// A reversible instruction addition. Undo must check that the instruction
+/// still has its imported text before archiving it.
+#[derive(Debug, Clone)]
+pub struct PlannedInstructionAddition {
+    pub create: WorkOutlineMutation,
+    pub undo: WorkOutlineMutation,
+    pub expected_text: String,
+}
+
+/// Plan additions to empty scopes. Existing instructions require explicit
+/// conflict resolution and are deliberately refused by this operation.
+pub fn plan_instruction_additions(
+    snapshot: &WorkOutlineSnapshot,
+    scopes: &[WorkflowPackScopePreview],
+    operation_id: &str,
+) -> Result<Vec<PlannedInstructionAddition>, String> {
+    let mut result = Vec::new();
+    for scope in scopes {
+        if !scope.current.is_empty() {
+            return Err("An instruction conflict requires a resolution".into());
+        }
+        if scope
+            .missing_from
+            .is_some_and(|index| index >= scope.item_path.len())
+        {
+            return Err("The instruction preview has an invalid missing path".into());
+        }
+        let item_id = if scope.missing_from.is_some() {
+            let normalized: Vec<String> = scope
+                .item_path
+                .iter()
+                .map(|part| part.trim().to_lowercase())
+                .collect();
+            let path = serde_json::to_string(&normalized).map_err(|error| error.to_string())?;
+            let item_operation = derive_id(operation_id, &path);
+            Some(derive_id(
+                &item_operation,
+                mast_proto::work_outline::roles::ITEM,
+            ))
+        } else {
+            scope.work_item_id.clone()
+        };
+        let target = match item_id {
+            Some(work_item_id) => mast_proto::InstructionScope::WorkItem { work_item_id },
+            None => mast_proto::InstructionScope::SpaceRoot,
+        };
+        let path = serde_json::to_string(&scope.item_path).map_err(|error| error.to_string())?;
+        for (index, text) in scope.incoming.iter().enumerate() {
+            let op = derive_id(operation_id, &format!("instruction:{path}:{index}"));
+            let instruction_id = derive_id(&op, mast_proto::work_outline::roles::INSTRUCTION);
+            result.push(PlannedInstructionAddition {
+                create: WorkOutlineMutation::CreateWorkItemInstruction(
+                    mast_proto::CreateWorkItemInstructionParams {
+                        space_id: snapshot.space_id.clone(),
+                        scope: target.clone(),
+                        text: text.clone(),
+                        placement: None,
+                        source: None,
+                        operation_id: op.clone(),
+                    },
+                ),
+                undo: WorkOutlineMutation::ArchiveWorkItemInstruction(
+                    mast_proto::ArchiveWorkItemInstructionParams {
+                        instruction_id,
+                        operation_id: derive_id(&op, "undo"),
+                    },
+                ),
+                expected_text: text.clone(),
+            });
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +265,45 @@ mod tests {
             WorkOutlineMutation::CreateWorkItem(p) => p.operation_id.len() <= 64,
             _ => false,
         }));
+    }
+
+    #[test]
+    fn instruction_plan_targets_created_item_and_includes_inverse() {
+        let snapshot: WorkOutlineSnapshot = serde_json::from_value(serde_json::json!({
+            "spaceId":"space", "available":true, "synced":true
+        }))
+        .unwrap();
+        let scope = WorkflowPackScopePreview {
+            item_path: vec!["Tasks".into()],
+            work_item_id: None,
+            missing_from: Some(0),
+            current: vec![],
+            incoming: vec!["Rule".into()],
+        };
+        let items = plan_missing_items(&snapshot, std::slice::from_ref(&scope), "import").unwrap();
+        let WorkOutlineMutation::CreateWorkItem(item) = &items[0] else {
+            panic!("expected item")
+        };
+        let additions = plan_instruction_additions(&snapshot, &[scope], "import").unwrap();
+        let WorkOutlineMutation::CreateWorkItemInstruction(instruction) = &additions[0].create
+        else {
+            panic!("expected instruction")
+        };
+        assert_eq!(
+            instruction.scope,
+            mast_proto::InstructionScope::WorkItem {
+                work_item_id: derive_id(&item.operation_id, mast_proto::work_outline::roles::ITEM)
+            }
+        );
+        let WorkOutlineMutation::ArchiveWorkItemInstruction(undo) = &additions[0].undo else {
+            panic!("expected inverse")
+        };
+        assert_eq!(
+            undo.instruction_id,
+            derive_id(
+                &instruction.operation_id,
+                mast_proto::work_outline::roles::INSTRUCTION
+            )
+        );
     }
 }
