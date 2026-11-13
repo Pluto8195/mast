@@ -260,7 +260,11 @@ pub(crate) fn settings_choice(
         .border_1()
         .when(industrial, |el| el.border_b_2())
         .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
+        .bg(if selected && horizon {
+            // Horizon tints every control with the accent, so the selected
+            // segment needs a clearly stronger fill than its neighbours.
+            theme.accent.opacity(0.32)
+        } else if selected {
             theme.accent_wash
         } else if horizon {
             theme.accent.opacity(0.08)
@@ -277,7 +281,9 @@ pub(crate) fn settings_choice(
         } else {
             gpui::FontWeight::NORMAL
         })
-        .text_color(if selected {
+        .text_color(if selected && horizon {
+            theme.text
+        } else if selected {
             theme.accent
         } else {
             theme.text_muted

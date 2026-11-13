@@ -826,7 +826,8 @@ impl Render for WorkflowPackPage {
         let theme = Theme::of(cx).clone();
         let space = self.space_name(cx);
         let has_space = self.space_id(cx).is_some();
-        let idle = matches!(self.stage, Stage::Idle);
+        // Starting another export or import just replaces an open review.
+        let idle = !matches!(self.stage, Stage::Working(_));
         let subtitle = match &space {
             Some(name) => format!(
                 "Move the instructions and project templates of {name} to another Space. Imports are previewed first and can be undone."
