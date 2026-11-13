@@ -903,11 +903,11 @@ mod tests {
                 let got = last_valid_line(&path).unwrap();
                 assert_eq!(
                     got.as_ref().map(|(seq, _)| *seq),
-                    expected.as_ref().map(|(seq, _)| *seq),
+                    expected.as_ref().map(|record| record.seq),
                     "{name} trailing_newline={trailing_newline}"
                 );
-                let (next, needs_newline) = scan_tail(&path).unwrap();
-                assert_eq!(next, expected.map_or(1, |(seq, _)| seq + 1), "{name}");
+                let (next, _, needs_newline) = scan_tail(&path).unwrap();
+                assert_eq!(next, expected.map_or(1, |record| record.seq + 1), "{name}");
                 assert_eq!(
                     needs_newline,
                     !body.is_empty() && !body.ends_with('\n'),
@@ -1054,6 +1054,43 @@ mod tests {
         assert!(matches!(after[0].1, AgentEvent::Done { .. }));
         // Era fallback: cursor ahead of last seq replays everything.
         assert_eq!(journal.replay("chat-1", 99).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn timestamps_round_trip_and_preserve_legacy_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let legacy = format!("{}\n", journal_line(1, "legacy"));
+        let path = dir.path().join("chat.jsonl");
+        std::fs::write(&path, &legacy).unwrap();
+        assert_eq!(journal.replay_records("chat", 0).unwrap()[0].ts, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        journal.append("chat", &text("timestamped")).unwrap();
+        let records = journal.replay_records("chat", 0).unwrap();
+        assert_eq!(records[0].ts, None);
+        assert!(records[1].ts.unwrap() > 0);
+        assert!(std::fs::read_to_string(path).unwrap().starts_with(&legacy));
+    }
+
+    #[test]
+    fn timestamps_do_not_decrease_across_appends_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        for _ in 0..3 { journal.append("chat", &text("event")).unwrap(); }
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat", &text("event")).unwrap();
+        let timestamps: Vec<_> = journal.replay_records("chat", 0).unwrap()
+            .into_iter().map(|record| record.ts.unwrap()).collect();
+        assert!(timestamps.windows(2).all(|pair| pair[0] <= pair[1]));
+        // A future timestamp simulates a clock adjustment, including on reopen.
+        drop(journal);
+        let path = dir.path().join("future.jsonl");
+        let future = JournalLine { seq: 1, ts: Some(u64::MAX), event: text("future") };
+        std::fs::write(path, format!("{}\n", serde_json::to_string(&future).unwrap())).unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("future", &text("next")).unwrap();
+        assert_eq!(journal.replay_records("future", 0).unwrap()[1].ts, Some(u64::MAX));
     }
 
     #[test]
