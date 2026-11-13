@@ -528,7 +528,16 @@ impl RunJournal {
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
         Ok(self.replay_records(chat_id, after_seq)?.into_iter()
-            .map(|record| (record.seq, record.event)).collect())
+            .map(|record| {
+                let mut event = record.event;
+                // Session identity is journal metadata; keep replay consistent
+                // with the live event stream consumed by the UI.
+                if let AgentEvent::SessionStarted { chat_id, space_id, .. } = &mut event {
+                    *chat_id = None;
+                    *space_id = None;
+                }
+                (record.seq, event)
+            }).collect())
     }
 
     /// Journal records including their optional epoch-millisecond timestamp.
