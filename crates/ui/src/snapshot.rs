@@ -214,6 +214,75 @@ pub fn linear_settings_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
     cx.new(|cx| crate::linear::settings_page::LinearSettingsPage::offline_fixture(state, cx))
 }
 
+/// Workflow pack settings with an import preview and recent imports, no RPC.
+pub fn workflow_pack_fixture(cx: &mut App) -> Entity<impl Render + use<>> {
+    use crate::settings::workflow_pack::{
+        Choice, ImportPreview, ImportReview, ReceiptRow, ReceiptSummary, WorkflowPackPage,
+    };
+    use mast_proto::work_outline_templates::TemplateNode;
+    use mast_proto::workflow_pack::{WorkflowPackScopePreview, WorkflowPackTemplatePreview};
+    let state = cx.new(|_| {
+        let mut state = crate::state::AppState::new();
+        let space = serde_json::from_value(serde_json::json!({
+            "id": "space-1", "deviceId": "device-1", "path": "/work/atlas",
+            "name": "Atlas", "createdAt": "2026-01-01T00:00:00Z"
+        }))
+        .expect("space fixture");
+        state.spaces = vec![space];
+        state.selected_space = Some("space-1".into());
+        state
+    });
+    let texts = |items: &[&str]| items.iter().map(|text| text.to_string()).collect::<Vec<_>>();
+    let node = |title: &str| TemplateNode { title: title.into(), ..Default::default() };
+    let mut review = ImportReview::new(ImportPreview {
+        preview_id: "fixture".into(),
+        scopes: vec![
+            WorkflowPackScopePreview {
+                item_path: vec![],
+                work_item_id: None,
+                missing_from: None,
+                current: texts(&["Run the tests before committing", "Keep commits small"]),
+                incoming: texts(&["Run the tests before committing", "Write a short summary", "Link the ticket"]),
+            },
+            WorkflowPackScopePreview {
+                item_path: texts(&["Projects", "Reviews"]),
+                work_item_id: None,
+                missing_from: Some(1),
+                current: vec![],
+                incoming: texts(&["Review for correctness first"]),
+            },
+            WorkflowPackScopePreview {
+                item_path: texts(&["Tasks"]),
+                work_item_id: Some("item-1".into()),
+                missing_from: None,
+                current: texts(&["Prefer small tasks"]),
+                incoming: texts(&["One task per branch"]),
+            },
+        ],
+        templates: vec![
+            WorkflowPackTemplatePreview { name: "Feature".into(), current: Some(node("Feature")), incoming: node("Feature v2") },
+            WorkflowPackTemplatePreview { name: "Bug".into(), current: None, incoming: node("Bug") },
+        ],
+    });
+    review.scope_choices[0] = Choice::Append;
+    review.scope_choices[2] = Choice::Replace;
+    let receipts = vec![
+        ReceiptRow {
+            id: "r1".into(),
+            created_at: chrono::Utc::now().timestamp_millis() - 3 * 3_600_000,
+            undone_at: None,
+            summary: ReceiptSummary { items_created: 1, instructions_added: 3, instructions_archived: 1, templates_added: 1, templates_replaced: 0 },
+        },
+        ReceiptRow {
+            id: "r2".into(),
+            created_at: chrono::Utc::now().timestamp_millis() - 2 * 86_400_000,
+            undone_at: Some(1),
+            summary: ReceiptSummary { instructions_added: 2, ..Default::default() },
+        },
+    ];
+    cx.new(|cx| WorkflowPackPage::fixture(state, review, receipts, cx))
+}
+
 /// Offline chat shell with a single in-memory worker.
 pub fn team_fixture(data_dir: PathBuf, cx: &mut App) -> Entity<crate::shell::Shell> {
     let shell = chat_fixture(data_dir, cx);
