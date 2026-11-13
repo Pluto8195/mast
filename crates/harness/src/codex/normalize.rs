@@ -543,11 +543,11 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => vec![AgentEvent::ToolResult {
                 id,
                 is_error: status == "failed",
-                output: ["error", "result"].iter().filter_map(|key| item.get(*key))
+                output: (status == "failed").then(|| ["error", "result"].iter().filter_map(|key| item.get(*key))
                     .filter(|value| !value.is_null())
                     .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
                     .reduce(|a, b| format!("{a}\n{b}"))
-                    .map(|text| cap_output(&text)),
+                    .map(|text| cap_output(&text))).flatten(),
                 exit_code: None,
                 diff: None,
             }],
@@ -981,6 +981,15 @@ mod tests {
         assert_eq!(delta_text(&json!({"textDelta": "b"})), Some("b".into()));
         assert_eq!(delta_text(&json!({"delta": ""})), None);
         assert_eq!(delta_text(&json!({})), None);
+    }
+
+    #[test]
+    fn successful_mcp_results_do_not_expose_output() {
+        let events = map_item(Phase::Completed, &json!({
+            "type": "mcpToolCall", "id": "mcp", "status": "completed",
+            "result": {"content": [{"type": "text", "text": "private content"}]}
+        }));
+        assert!(matches!(&events[..], [AgentEvent::ToolResult { is_error: false, output: None, .. }]));
     }
 
     #[test]
