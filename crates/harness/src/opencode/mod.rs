@@ -3085,6 +3085,7 @@ fn part_snapshot_events(
                     id: call_id,
                     is_error: status == "error",
                     output,
+                    exit_code: None,
                     diff: None,
                 });
             }

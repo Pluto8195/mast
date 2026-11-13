@@ -478,6 +478,9 @@ pub enum AgentEvent {
     ToolResult {
         id: String,
         is_error: bool,
+        /// Process exit status, when supplied by the harness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
         /// Tool output text, capped by the emitting harness (ACP tool-call
         /// content; claude/codex adapters never populate it). The doc-side
         /// fold applies its own byte cap before anything persists.

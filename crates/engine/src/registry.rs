@@ -480,6 +480,7 @@ fn default_registry_with_model_discovery_cwd(
                 id: "mock-tool-1".into(),
                 is_error: false,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
             AgentEvent::ToolCall {
@@ -493,6 +494,7 @@ fn default_registry_with_model_discovery_cwd(
                 id: "mock-tool-2".into(),
                 is_error: false,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
             AgentEvent::TextDelta {

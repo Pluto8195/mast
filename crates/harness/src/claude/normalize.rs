@@ -540,6 +540,7 @@ impl Normalizer {
                                     id: b.tool_use_id.clone(),
                                     is_error: b.is_error.unwrap_or(false),
                                     output: tool_result_output(&b),
+                                    exit_code: b.exit_code,
                                     diff: None,
                                 },
                             )
@@ -569,6 +570,7 @@ impl Normalizer {
                         id: b.tool_use_id.clone(),
                         is_error: b.is_error.unwrap_or(false),
                         output: tool_result_output(&b),
+                        exit_code: b.exit_code,
                         diff: None,
                     })
                     .collect()
@@ -853,6 +855,7 @@ mod tests {
                     id: "t1".into(),
                     is_error: false,
                     output: Some("command output\n".into()),
+                    exit_code: None,
                     diff: None,
                 }),
             }]
@@ -870,6 +873,7 @@ mod tests {
                 id: "t1".into(),
                 is_error: false,
                 output: Some("first\nsecond".into()),
+                exit_code: None,
                 diff: None,
             }]
         );

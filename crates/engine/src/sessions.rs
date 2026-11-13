@@ -1801,6 +1801,7 @@ impl Inner {
                             id: id.strip_suffix(":image").unwrap_or(&id).into(),
                             is_error: true,
                             output: None,
+                            exit_code: None,
                             diff: None,
                         },
                         AgentEvent::Error {
@@ -4064,6 +4065,7 @@ mod tests {
             id: "call-1".into(),
             is_error: false,
             output: Some("old output".into()),
+            exit_code: None,
             diff: None,
         };
         journal.append("chat-1", &old).unwrap();
@@ -4080,6 +4082,7 @@ mod tests {
                     id: "call-1".into(),
                     is_error: false,
                     output: Some("latest output".into()),
+                    exit_code: None,
                     diff: Some(diff.clone()),
                 },
             )
@@ -4093,6 +4096,7 @@ mod tests {
                         id: "wrapped-call".into(),
                         is_error: false,
                         output: Some("wrapped output".into()),
+                        exit_code: None,
                         diff: Some(diff.clone()),
                     }),
                 },

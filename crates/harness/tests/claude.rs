@@ -171,6 +171,7 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
             id: "sub-tool".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         }),
     }));
@@ -199,12 +200,14 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
         id: "tool-1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "tool-2".into(),
         is_error: true,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 

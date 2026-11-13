@@ -420,6 +420,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                     id: mast_proto::LIVE_PLAN_TOOL_ID.into(),
                     is_error: false,
                     output: None,
+                    exit_code: None,
                     diff: None,
                 },
             ]
@@ -558,6 +559,7 @@ mod tests {
                     id: "t1".into(),
                     is_error: false,
                     output: Some("total 0".into()),
+                    exit_code: None,
                     diff: None,
                 },
             ]
@@ -597,6 +599,7 @@ mod tests {
                 id: "t2".into(),
                 is_error: false,
                 output: None,
+                exit_code: None,
                 diff: Some(ToolDiff {
                     path: "/w/src/main.rs".into(),
                     old_text: Some("fn old() {}".into()),
@@ -640,6 +643,7 @@ mod tests {
                 id: "t4".into(),
                 is_error: true,
                 output: None,
+                exit_code: None,
                 diff: None,
             }]
         );

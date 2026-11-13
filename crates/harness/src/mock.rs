@@ -302,6 +302,7 @@ impl Harness for MockHarness {
                         id: "mock-think-tool".into(),
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     },
                 ]
@@ -340,6 +341,7 @@ impl Harness for MockHarness {
                     id: id.into(),
                     is_error: false,
                     output: None,
+                    exit_code: None,
                     diff: None,
                 };
                 let done = AgentEvent::Done {
@@ -505,6 +507,7 @@ impl Harness for MockHarness {
                         id: "mock-code-tool".into(),
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     },
                 ]
@@ -814,6 +817,7 @@ impl Harness for InstructionMockHarness {
                         id: spawn_id,
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     }));
                 }

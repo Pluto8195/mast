@@ -2031,6 +2031,7 @@ fn parse_transcript(path: &Path, device_id: &str) -> Result<ParsedTranscript, En
                             id: block.tool_use_id.clone(),
                             is_error: block.is_error.unwrap_or(false),
                             output: imported_tool_result_output(&block.content),
+                            exit_code: None,
                             diff: None,
                         };
                         fold_event_into_parts(&mut turn_parts, &event);

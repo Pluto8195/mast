@@ -226,6 +226,7 @@ fn tool_lifecycle(phase: Phase, id: String, call: ToolCall, is_error: bool) -> V
                 id,
                 is_error,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
         ],
@@ -447,6 +448,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     id: id.clone(),
                     is_error: error.is_some(),
                     output: None,
+                    exit_code: None,
                     diff: None,
                 },
             ];
@@ -479,15 +481,16 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => {
                 let exit_code = field(item, &["exitCode", "exit_code"])
                     .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                    .and_then(|value| i32::try_from(value).ok());
                 let output = field(item, &["aggregatedOutput", "aggregated_output"])
                     .and_then(Value::as_str)
                     .filter(|text| !text.is_empty())
                     .map(cap_output);
                 vec![AgentEvent::ToolResult {
                     id,
-                    is_error: status == "failed" || exit_code != 0,
+                    is_error: status == "failed" || exit_code.is_some_and(|code| code != 0),
                     output,
+                    exit_code,
                     diff: None,
                 }]
             }
@@ -517,6 +520,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                         id,
                         is_error,
                         output: None,
+                        exit_code: None,
                         diff: (!is_error)
                             .then(|| file_change_diff(&raw_changes))
                             .flatten(),
@@ -544,6 +548,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
                     .reduce(|a, b| format!("{a}\n{b}"))
                     .map(|text| cap_output(&text)),
+                exit_code: None,
                 diff: None,
             }],
         },
@@ -1003,6 +1008,7 @@ mod tests {
                 id: "c1".into(),
                 is_error: true,
                 output: None,
+                exit_code: None,
                 diff: None,
             }]
         );
@@ -1046,6 +1052,7 @@ mod tests {
                     id: "f2".into(),
                     is_error: true,
                     output: None,
+                    exit_code: None,
                     diff: None,
                 },
             ]

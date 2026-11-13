@@ -110,6 +110,7 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
         id: "c1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 

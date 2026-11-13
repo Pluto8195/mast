@@ -440,6 +440,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             is_error,
             output,
             diff,
+            ..
         } => {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
@@ -941,6 +942,7 @@ mod tests {
                 id: "t".into(),
                 is_error: true,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
         );
@@ -1197,6 +1199,7 @@ mod tests {
             id: "edit-1".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: Some(diff.clone()),
         };
         let mut parts = vec![MessagePart::Tool {
@@ -1251,6 +1254,7 @@ mod tests {
                 id: "t".into(),
                 is_error: false,
                 output: Some(full.clone()),
+                exit_code: None,
                 diff: Some(ToolDiff {
                     path: "/w/a.rs".into(),
                     old_text: Some("a\n".into()),
@@ -1306,6 +1310,7 @@ mod tests {
                 id: "t1".into(),
                 is_error: false,
                 output: Some("hello".into()),
+                exit_code: None,
                 diff: Some(ToolDiff {
                     path: "/w/a".into(),
                     old_text: None,
@@ -1462,6 +1467,7 @@ mod tests {
                 id: "t".into(),
                 is_error: false,
                 output: Some("   \n".into()),
+                exit_code: None,
                 diff: None,
             }),
             None,
@@ -1471,6 +1477,7 @@ mod tests {
             id: "t".into(),
             is_error: true,
             output: Some("full output".into()),
+            exit_code: None,
             diff: None,
         })
         .unwrap();

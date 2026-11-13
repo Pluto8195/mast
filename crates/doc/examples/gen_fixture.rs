@@ -53,6 +53,7 @@ fn main() {
             id: "tool-1".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         },
     );

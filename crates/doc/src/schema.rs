@@ -1822,6 +1822,7 @@ mod tests {
                 id: "tool-1".into(),
                 is_error: false,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
         );
@@ -1931,6 +1932,7 @@ mod tests {
                 id: "t1".into(),
                 is_error: false,
                 output: Some("total 0\nmore lines".into()),
+                exit_code: None,
                 diff: Some(mast_proto::ToolDiff {
                     path: "/w/a.rs".into(),
                     old_text: Some("old\n".into()),
