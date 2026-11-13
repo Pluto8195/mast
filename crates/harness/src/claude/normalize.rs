@@ -66,12 +66,13 @@ fn assistant_error_text(code: &str) -> String {
 /// Identify explicit usage-limit messages without classifying ordinary replies.
 fn usage_limit_code(text: &str) -> Option<&'static str> {
     let text = text.to_ascii_lowercase();
-    if !(text.contains("hit your limit") || text.contains("usage limit") || text.contains("rate_limit")) {
+    if !(text.contains("usage limit") || text.contains("rate_limit")
+        || (text.contains("hit your") && text.contains("limit"))) {
         return None;
     }
-    if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") {
+    if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") || text.contains("7 day") {
         Some("usage_weekly")
-    } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") {
+    } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") || text.contains("five hour") || text.contains("5h") {
         Some("usage_5h")
     } else {
         Some("other")
@@ -723,6 +724,10 @@ impl Normalizer {
                         window: Some(window),
                     });
                 }
+                if let AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } = &done
+                    && let Some(code) = usage_limit_code(message) {
+                    out.push(AgentEvent::Error { message: message.clone(), code: Some(code.into()), resets_at: None });
+                }
                 out.extend([usage, done]);
                 out
             }
@@ -792,6 +797,7 @@ mod tests {
     fn usage_limit_text_and_reset_units_are_classified() {
         assert_eq!(usage_limit_code("You've hit your limit for the 5-hour window"), Some("usage_5h"));
         assert_eq!(usage_limit_code("You've hit your weekly usage limit"), Some("usage_weekly"));
+        assert_eq!(usage_limit_code("You've hit your 5-hour limit"), Some("usage_5h"));
         assert_eq!(usage_limit_code("rate_limit"), Some("other"));
         assert_eq!(usage_limit_code("weekly report"), None);
         assert_eq!(reset_millis(1_786_985_400), Some(1_786_985_400_000));
