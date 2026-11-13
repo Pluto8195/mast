@@ -580,6 +580,7 @@ struct LogState {
     file: std::fs::File,
     day: u64,
     canonical: bool,
+    swept_day: Option<u64>,
 }
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DailyLog {
@@ -630,7 +631,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
     let day = file.metadata().ok().and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() / LOG_DAY_SECONDS).unwrap_or_else(log_day);
-    let mut state = LogState { dir: dir.to_owned(), mode: mode.into(), file, day, canonical };
+    let mut state = LogState { dir: dir.to_owned(), mode: mode.into(), file, day, canonical, swept_day: None };
     state.prepare(log_day()).ok()?;
     Some(DailyLog { state: std::sync::Mutex::new(state) })
 }
@@ -652,7 +653,7 @@ impl LogState {
             self.file = replacement;
             self.day = today;
         }
-        if self.canonical {
+        if self.canonical && self.swept_day != Some(today) {
             let prefix = format!("mast-{}.day-", self.mode);
             if let Ok(entries) = std::fs::read_dir(&self.dir) {
                 for entry in entries.flatten() {
@@ -664,6 +665,7 @@ impl LogState {
                     }
                 }
             }
+            self.swept_day = Some(today);
         }
         let len = self.file.metadata()?.len();
         if len > LOG_DAY_BYTES {
