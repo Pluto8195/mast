@@ -1774,6 +1774,20 @@ pub(crate) fn worker_metadata(theme: &Theme, label: String, color: gpui::Hsla) -
         .child(SharedString::from(label))
 }
 
+/// A small icon + label action at the worker row's metadata size (e.g. "Changes").
+pub(crate) fn worker_action_link(theme: &Theme, icon: &'static str, label: &'static str) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_muted)
+        .child(crate::icons::icon(icon).size(px(12.0)))
+        .child(label)
+}
+
 pub(crate) fn worker_activity(
     theme: &Theme,
     selector: String,

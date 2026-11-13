@@ -321,15 +321,9 @@ impl Shell {
                         crate::components::shell_parts::worker_metadata(theme, age, theme.text_faint),
                     )
                     .child(
-                        div()
+                        crate::components::shell_parts::worker_action_link(theme, crate::icons::FILE_CODE, "Changes")
                             .id(SharedString::from(changes_selector.clone()))
                             .debug_selector(move || changes_selector.clone())
-                            .cursor_pointer()
-                            .flex().items_center().gap(px(3.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted)
-                            .child(crate::icons::icon(crate::icons::FILE_CODE).size(px(12.0)))
-                            .child("Changes")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx);
