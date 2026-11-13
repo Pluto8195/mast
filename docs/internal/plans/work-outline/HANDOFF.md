@@ -28,6 +28,21 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 88: workflow pack + agent logging/error fixes** (2026-11-13, 3af296e43; full suite from 4a08b739d:
+  nextest 2589/2590, only the known `preview::leak remote_preview_churn` hang; UI 2637/0).
+  - Workflow pack: Settings → Workflow pack exports a Space's instructions and templates and imports them elsewhere,
+    with a per-conflict Keep mine / Add missing / Replace preview, single-lock apply and undo from receipts stored
+    host-locally in `workflow-pack-receipts/`. Admin-only MCP tools `work_outline_workflow_pack_*`; format in
+    `docs/workflow-pack-format.md`.
+  - Logging, from the agent error audit (mast-artifact:7e446c29): a `ts` on every journal record; `exitCode` on
+    ToolResult; Codex MCP failures keep their error text (failures only); `chatId`/`spaceId` on sessionStarted;
+    usage-limit errors carry `code` and `resetsAt` (ms/s sanity, 8-day cap), and auto-wakes and auto-continue defer
+    until reset (a deferred auto-continue is lost on restart; Errored workers auto-continue after reset); 7 daily app
+    log files, legacy `zeron-*.log` removed; friction reports keep per-occurrence history (last 50).
+  - Follow-up: after a rejected `rate_limit_event` with no `result` frame, `emitted_limit_error` stays set, so the next
+    turn's limit is missed.
+  - Backup: `~/zeron-dev-app-backups/mast-release-87`.
+
 - **Release 87: worker Changes in one click + GitHub-style file tree** (2026-11-13, 4c4dc0d61; UI 2634/0, mast-gallery
   8/8): Team, Item and running-chat worker rows get a "Changes" link (worktree first, pushed-branch fallback; was 3
   clicks); Ready to merge diff links use the same path. Changes file tree: collapsible folders with per-diff state,
@@ -1154,7 +1169,12 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
-- **Installed: release 87.**
+- **Installed: release 88.**
+- **Next to start:** coordinator reach (message any chat in the subtree) + sheet-answer routing to the current owner
+  (friction rec 6); approval rule proposal for Codex cargo test in worktrees (ec30a2df); three proposed Space-root
+  instructions (talk rules, no polling finished sessions, shell/CI habits) await Mikey.
+- **Terra pattern:** ends turns early when a design choice or the finish line is vague; workflow pack moved to Sonnet
+  after 6 stops. Give checklists that end in the Required Action, and answer "what exactly blocks you" with decisions.
 - **Orchestrator friction** (report mast-artifact:1e838a8e, item 62aa8fe0): Mikey picked all four fixes.
   - Skill edits are live in `~/.agents/skills` (implement-ticket, project-planner, talk-to-me); backup in
     `~/skills-backups/2026-11-12-friction/`; awaiting his keep/undo (request 289320e7). He still has to paste the
