@@ -3660,14 +3660,38 @@ impl Shell {
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(branch) = branch {
+        let checkout = {
+            let state = self.state.read(cx);
+            let targets = state.chat_diff_targets(&chat_id);
+            targets.iter()
+                .find(|target| branch.as_ref().is_some_and(|branch| target.branch.as_ref() == Some(branch)))
+                .or_else(|| targets.iter().find(|target| target.selected))
+                .or_else(|| targets.first())
+                .map(|target| target.path.clone())
+        };
+        if let Some(path) = checkout {
+            let task = self.state.update(cx, |state, cx| {
+                state.clear_chat_diff_member_pick(&chat_id);
+                state.set_chat_diff_target(&chat_id, mast_proto::SetChatDiffTargetAction::Select, Some(path), cx)
+            });
+            task.detach();
+        } else if let Some(branch) = branch {
             let task = self.state.update(cx, |state, cx| {
                 state.clear_chat_diff_member_pick(&chat_id);
                 state.bind_chat_ref_target(&chat_id, branch, None, cx)
             });
             task.detach();
         }
-        self.open_chat_changes(chat_id, cx);
+        self.open_chat(chat_id.clone(), cx);
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            this.update(cx, |this, cx| {
+                this.set_surfaces_open(true, cx);
+                let changes = cx.new(|cx| Changes::for_chat(this.state.clone(), chat_id, cx));
+                changes.update(cx, |changes, cx| changes.set_scope(crate::changes::DiffScope::Branch, cx));
+                this.register_diff_surface(changes, cx);
+            }).ok();
+        });
     }
 
     fn add_diff_surface(&mut self, cx: &mut Context<Self>) {

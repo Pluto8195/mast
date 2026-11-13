@@ -1159,6 +1159,20 @@ fn the_team_tab_lists_a_worker_per_row_with_state_activity_and_a_roll_up(cx: &mu
 }
 
 #[gpui::test]
+fn worker_changes_action_opens_a_diff(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);
+    add_workers(&shell, vcx, 2);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let position = vcx.debug_bounds("team-worker-changes-w-0").unwrap().center();
+    vcx.simulate_click(position, gpui::Modifiers::default());
+    draw(vcx);
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.diffs.len(), 1);
+    });
+}
+
+#[gpui::test]
 fn team_tab_rows_stack_without_overlap_for_two_and_fifteen_workers(cx: &mut TestAppContext) {
     for n in [2usize, 15] {
         let (shell, vcx) = mount(cx, CHAT_API, true, worker_asks);

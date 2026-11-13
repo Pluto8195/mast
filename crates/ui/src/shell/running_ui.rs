@@ -1058,6 +1058,10 @@ impl Shell {
         };
         let chat_id = row.chat_id.clone();
         let pane_id = row.chat_id.clone();
+        let changes_id = row.chat_id.clone();
+        let changes_branch = self.state.read(cx).chats.iter()
+            .find(|chat| chat.id == row.chat_id)
+            .and_then(|chat| chat.branch.clone());
         let failed = self
             .state
             .read(cx)
@@ -1097,6 +1101,18 @@ impl Shell {
                                     .truncate()
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child(SharedString::from(row.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("running-changes-{}", row.chat_id)))
+                                    .text_color(theme.text_dim)
+                                    .cursor_pointer()
+                                    .child("Changes")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.close_running_chats(window, cx);
+                                        this.open_request_diff(changes_id.clone(), changes_branch.clone(), cx);
+                                    })),
                             )
                             .when(row.state == RunState::Awaiting || failed, |el| {
                                 let (label, color) = if row.state == RunState::Awaiting {

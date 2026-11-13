@@ -644,6 +644,7 @@ pub struct UiSettings {
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
     pub sidebar_width: f32,
+    pub changes_file_list_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
@@ -830,6 +831,7 @@ impl Default for UiSettings {
             profile_at_migration: None,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
+            changes_file_list_width: 240.0,
             sidebar_collapsed: false,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
@@ -1869,6 +1871,7 @@ impl UiSettings {
     pub fn clamped(mut self) -> Self {
         self.transcript_width = normalize_transcript_width(self.transcript_width);
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
+        self.changes_file_list_width = clamp_or(self.changes_file_list_width, 160.0, 600.0, 240.0);
         self.sidebar_width = clamp_or(
             self.sidebar_width,
             SIDEBAR_MIN,
@@ -2942,11 +2945,25 @@ mod tests {
     }
 
     #[test]
+    fn changes_file_list_width_is_clamped_and_serialized() {
+        let mut settings = UiSettings::default();
+        settings.changes_file_list_width = 1000.0;
+        assert_eq!(settings.clone().clamped().changes_file_list_width, 600.0);
+        settings.changes_file_list_width = 10.0;
+        assert_eq!(settings.clone().clamped().changes_file_list_width, 160.0);
+        settings.changes_file_list_width = 320.0;
+        let saved = serde_json::to_string(&settings).unwrap();
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.changes_file_list_width, 320.0);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
             profile_at_migration: None,
             window_geometry: None,
+            changes_file_list_width: 240.0,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
