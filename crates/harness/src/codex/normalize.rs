@@ -1008,7 +1008,7 @@ mod tests {
                 id: "c1".into(),
                 is_error: true,
                 output: None,
-                exit_code: None,
+                exit_code: Some(2),
                 diff: None,
             }]
         );
