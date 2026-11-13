@@ -1,7 +1,7 @@
 //! Per-session on-disk event journal (port of zeron's `run-journal.ts`, JSONL-shaped).
 //!
 //! One append-only JSONL file per chat under `{data_dir}/journals/{chat_id}.jsonl`; each
-//! line is `{"seq": n, "event": AgentEvent}` with a monotonically increasing `seq`. The
+//! line is `{"seq": n, "ts": epoch_millis, "event": AgentEvent}` with a monotonically increasing `seq`. The
 //! journal is the durable replay source for live streams (`Subscribe` = replay then tail
 //! the broadcast hub) and the crash-recovery gauge: a journal whose LAST event is not
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
@@ -29,14 +29,17 @@ pub enum JournalError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct JournalLine {
-    seq: u64,
-    event: AgentEvent,
+pub struct JournalLine {
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
+    pub event: AgentEvent,
 }
 
 struct ChatJournal {
     file: File,
     next_seq: u64,
+    last_timestamp: u64,
     /// True when the file ends without a newline (torn write) — the next append
     /// starts with one so the torn line stays isolated.
     needs_newline: bool,
@@ -474,13 +477,14 @@ impl RunJournal {
                 files.clear();
             }
             let path = self.path_for(chat_id);
-            let (next_seq, needs_newline) = scan_tail(&path)?;
+            let (next_seq, last_timestamp, needs_newline) = scan_tail(&path)?;
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             files.insert(
                 chat_id.to_string(),
                 ChatJournal {
                     file,
                     next_seq,
+                    last_timestamp,
                     needs_newline,
                 },
             );
@@ -492,8 +496,14 @@ impl RunJournal {
             )));
         };
         let seq = journal.next_seq;
+        let timestamp = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis().min(u64::MAX as u128) as u64)
+            .max(journal.last_timestamp);
         let line = serde_json::to_string(&JournalLine {
             seq,
+            ts: Some(timestamp),
             event: event.clone(),
         })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
@@ -506,6 +516,7 @@ impl RunJournal {
         journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
+        journal.last_timestamp = timestamp;
         Ok(seq)
     }
 
@@ -516,14 +527,30 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
-        let path = self.path_for(chat_id);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let all = read_lines(&path)?;
-        let last_seq = all.last().map(|(seq, _)| *seq).unwrap_or(0);
+        Ok(self.replay_records(chat_id, after_seq)?.into_iter()
+            .map(|record| {
+                let mut event = record.event;
+                // Session identity is journal metadata; keep replay consistent
+                // with the live event stream consumed by the UI.
+                if let AgentEvent::SessionStarted { chat_id, space_id, .. } = &mut event {
+                    *chat_id = None;
+                    *space_id = None;
+                }
+                (record.seq, event)
+            }).collect())
+    }
+
+    /// Journal records including their optional epoch-millisecond timestamp.
+    /// Records written before timestamps were introduced have no timestamp.
+    pub fn replay_records(
+        &self,
+        chat_id: &str,
+        after_seq: u64,
+    ) -> Result<Vec<JournalLine>, JournalError> {
+        let all = read_lines(&self.path_for(chat_id))?;
+        let last_seq = all.last().map(|record| record.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
-        Ok(all.into_iter().filter(|(seq, _)| *seq > from).collect())
+        Ok(all.into_iter().filter(|record| record.seq > from).collect())
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -618,7 +645,7 @@ fn skill_mtime(path: &Path) -> Option<u128> {
 }
 
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
-fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
+fn read_lines(path: &Path) -> Result<Vec<JournalLine>, JournalError> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -631,7 +658,7 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
             continue;
         }
         match serde_json::from_str::<JournalLine>(&line) {
-            Ok(parsed) => out.push((parsed.seq, parsed.event)),
+            Ok(parsed) => out.push(parsed),
             Err(err) => {
                 tracing::warn!(path = %path.display(), error = %err, "journal: skipping malformed line");
             }
@@ -709,11 +736,11 @@ fn last_valid_line(path: &Path) -> Result<Option<(u64, AgentEvent)>, JournalErro
 }
 
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.
-fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
+fn scan_tail(path: &Path) -> Result<(u64, u64, bool), JournalError> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, false)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, 0, false)),
         Err(e) => return Err(e.into()),
     };
     let len = file.metadata()?.len();
@@ -726,8 +753,13 @@ fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
         last[0] != b'\n'
     };
     drop(file);
-    let next_seq = last_valid_line(path)?.map(|(seq, _)| seq + 1).unwrap_or(1);
-    Ok((next_seq, needs_newline))
+    let mut last = None;
+    rev_lines(path, |line| {
+        last = serde_json::from_slice::<JournalLine>(line.trim_ascii()).ok();
+        last.is_some()
+    })?;
+    let (next_seq, last_timestamp) = last.map(|line| (line.seq + 1, line.ts.unwrap_or(0))).unwrap_or((1, 0));
+    Ok((next_seq, last_timestamp, needs_newline))
 }
 
 /// Journal (`.jsonl`) and resume-budget (`.resume`) paths for `chat_id` under an
@@ -764,6 +796,7 @@ mod tests {
     fn journal_line(seq: u64, text: &str) -> String {
         serde_json::to_string(&JournalLine {
             seq,
+            ts: None,
             event: AgentEvent::TextDelta { text: text.into() },
         })
         .unwrap()
@@ -879,11 +912,11 @@ mod tests {
                 let got = last_valid_line(&path).unwrap();
                 assert_eq!(
                     got.as_ref().map(|(seq, _)| *seq),
-                    expected.as_ref().map(|(seq, _)| *seq),
+                    expected.as_ref().map(|record| record.seq),
                     "{name} trailing_newline={trailing_newline}"
                 );
-                let (next, needs_newline) = scan_tail(&path).unwrap();
-                assert_eq!(next, expected.map_or(1, |(seq, _)| seq + 1), "{name}");
+                let (next, _, needs_newline) = scan_tail(&path).unwrap();
+                assert_eq!(next, expected.map_or(1, |record| record.seq + 1), "{name}");
                 assert_eq!(
                     needs_newline,
                     !body.is_empty() && !body.ends_with('\n'),
@@ -1030,6 +1063,59 @@ mod tests {
         assert!(matches!(after[0].1, AgentEvent::Done { .. }));
         // Era fallback: cursor ahead of last seq replays everything.
         assert_eq!(journal.replay("chat-1", 99).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn legacy_event_fields_remain_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.jsonl");
+        let legacy = concat!(
+            "{\"seq\":1,\"event\":{\"type\":\"toolResult\",\"id\":\"tool\",\"isError\":true}}\n",
+            "{\"seq\":2,\"event\":{\"type\":\"error\",\"message\":\"failed\"}}\n"
+        );
+        std::fs::write(&path, legacy).unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let records = journal.replay_records("chat", 0).unwrap();
+        assert!(matches!(&records[0].event, AgentEvent::ToolResult { exit_code: None, .. }));
+        assert!(matches!(&records[1].event, AgentEvent::Error { code: None, resets_at: None, .. }));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+    }
+
+    #[test]
+    fn timestamps_round_trip_and_preserve_legacy_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let legacy = format!("{}\n", journal_line(1, "legacy"));
+        let path = dir.path().join("chat.jsonl");
+        std::fs::write(&path, &legacy).unwrap();
+        assert_eq!(journal.replay_records("chat", 0).unwrap()[0].ts, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        journal.append("chat", &text("timestamped")).unwrap();
+        let records = journal.replay_records("chat", 0).unwrap();
+        assert_eq!(records[0].ts, None);
+        assert!(records[1].ts.unwrap() > 0);
+        assert!(std::fs::read_to_string(path).unwrap().starts_with(&legacy));
+    }
+
+    #[test]
+    fn timestamps_do_not_decrease_across_appends_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        for _ in 0..3 { journal.append("chat", &text("event")).unwrap(); }
+        drop(journal);
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat", &text("event")).unwrap();
+        let timestamps: Vec<_> = journal.replay_records("chat", 0).unwrap()
+            .into_iter().map(|record| record.ts.unwrap()).collect();
+        assert!(timestamps.windows(2).all(|pair| pair[0] <= pair[1]));
+        // A future timestamp simulates a clock adjustment, including on reopen.
+        drop(journal);
+        let path = dir.path().join("future.jsonl");
+        let future = JournalLine { seq: 1, ts: Some(u64::MAX), event: text("future") };
+        std::fs::write(path, format!("{}\n", serde_json::to_string(&future).unwrap())).unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("future", &text("next")).unwrap();
+        assert_eq!(journal.replay_records("future", 0).unwrap()[1].ts, Some(u64::MAX));
     }
 
     #[test]

@@ -127,6 +127,8 @@ pub(crate) struct ContentBlock {
     pub tool_use_id: String,
     #[serde(default)]
     pub is_error: Option<bool>,
+    #[serde(default, alias = "exitCode")]
+    pub exit_code: Option<i32>,
     /// `tool_result` payload. Claude emits either a plain string or an array
     /// of typed content blocks; keep it losslessly so the normalizer can
     /// surface command/read output in the transcript.
@@ -146,6 +148,8 @@ pub(crate) struct RateLimitInfo {
     pub status: String,
     #[serde(rename = "rateLimitType", default)]
     pub rate_limit_type: Option<String>,
+    #[serde(rename = "resetsAt", default)]
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

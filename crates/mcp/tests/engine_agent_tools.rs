@@ -60,6 +60,8 @@ impl Harness for FakeClaude {
                 cwd: request.cwd,
                 session_id: "sess-fake".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,

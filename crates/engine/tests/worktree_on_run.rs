@@ -63,6 +63,8 @@ impl Harness for RecordingHarness {
                 cwd: request.cwd.clone(),
                 session_id: "sess-wt".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta {
                 text: format!("ack: {}", request.prompt),

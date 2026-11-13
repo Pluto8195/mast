@@ -81,6 +81,8 @@ fn session_started() -> AgentEvent {
         cwd: "/tmp".into(),
         session_id: "hs-q".into(),
         assistant_message_id: "a-q".into(),
+        chat_id: None,
+        space_id: None,
     }
 }
 
@@ -435,6 +437,7 @@ async fn open_tool_call_never_quiesces() {
             id: "tool-slow".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         })
         .unwrap();
@@ -475,6 +478,7 @@ async fn stale_tool_echo_stays_parked() {
             id: "tool-echoed".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         })
         .unwrap();

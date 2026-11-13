@@ -444,6 +444,7 @@ fn entry_events(entry: &Value) -> Vec<AgentEvent> {
                     id: id.to_owned(),
                     is_error: false,
                     output,
+                    exit_code: None,
                     diff: None,
                 });
             }

@@ -71,6 +71,8 @@ impl Harness for ScriptedHarness {
                     cwd: "/tmp".into(),
                     session_id: "hs-1".into(),
                     assistant_message_id: "a-1".into(),
+                    chat_id: None,
+                    space_id: None,
                 },
                 AgentEvent::TextDelta { text: text.into() },
                 AgentEvent::Done {

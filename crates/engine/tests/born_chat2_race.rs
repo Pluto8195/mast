@@ -61,6 +61,8 @@ impl Harness for OneLinerHarness {
                 cwd: request.cwd.clone(),
                 session_id: "sess-race".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta {
                 text: "the codeword is PINEAPPLE".into(),

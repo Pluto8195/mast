@@ -1109,6 +1109,11 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
         let mut finished = Vec::new();
+        // Recovery may read a journal once; never do that under the wake lock.
+        let limited_sessions: HashSet<String> = sessions.iter()
+            .filter(|session| session.status == SessionStatus::Errored)
+            .filter(|session| self.inner.sessions.usage_limit_reset(&session.chat_id).is_some_and(|at| at > now))
+            .map(|session| session.chat_id.clone()).collect();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.sessions_seeded;
@@ -1149,7 +1154,9 @@ impl OrchestratorWakes {
                     (true, SessionStatus::Idle) => WakeEventKind::TurnFinished,
                     _ => continue,
                 };
-                if kind == WakeEventKind::TurnFinished {
+                let limited_error = kind == WakeEventKind::Errored
+                    && limited_sessions.contains(&session.chat_id);
+                if kind == WakeEventKind::TurnFinished || limited_error {
                     if let Some(start) = state.turn_starts.remove(&session.chat_id) {
                         finished.push((session.clone(), start));
                     }
@@ -1196,7 +1203,30 @@ impl OrchestratorWakes {
 
     async fn continue_worker(&self, session: &Session, start: TurnStart) {
         let worker = &session.chat_id;
-        if !self.hosted_here(worker) || session.status != SessionStatus::Idle {
+        if let Some(reset) = self.inner.sessions.usage_limit_reset(worker).filter(|at| *at > self.now()) {
+            let this = self.clone();
+            let session = session.clone();
+            let delay = (reset - self.now()) as u64;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                if let Some(current) = this.inner.sessions.session_status(&session.chat_id)
+                    && current.status == session.status
+                    && current.updated_at == session.updated_at
+                    && current.last_completed_turn == session.last_completed_turn
+                    && this.inner.sessions.usage_limit_reset(&session.chat_id).is_none_or(|at| at <= this.now())
+                {
+                    this.continue_worker_ready(&current, start, true).await;
+                }
+            });
+            return;
+        }
+        self.continue_worker_ready(session, start, false).await;
+    }
+
+    async fn continue_worker_ready(&self, session: &Session, start: TurnStart, limited: bool) {
+        let worker = &session.chat_id;
+        if !self.hosted_here(worker) || (session.status != SessionStatus::Idle
+            && !(limited && session.status == SessionStatus::Errored)) {
             return;
         }
         let Ok(chats) = self.inner.workspace.read_chats() else {
@@ -1267,8 +1297,8 @@ impl OrchestratorWakes {
                     && item.archived_at.is_none(),
                 item_waiting: item.waiting_until.is_some(),
                 action_open,
-                completed: session.last_completed_turn.is_some()
-                    && session.last_completed_turn != start.last_completed_turn,
+                completed: limited || (session.last_completed_turn.is_some()
+                    && session.last_completed_turn != start.last_completed_turn),
                 awaiting_input: session.awaiting_input.is_some(),
                 tool_failures: session.last_turn_tool_failures.is_some(),
                 user_sent_during_turn: start.user_sent_during_turn
@@ -1651,6 +1681,7 @@ impl OrchestratorWakes {
     fn evaluate_blocking(&self, orch: &str, force: bool) {
         let now = self.now();
         let ctx = self.ctx(orch);
+        let limit_reset = self.inner.sessions.usage_limit_reset(orch).filter(|at| *at > now);
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
@@ -1696,6 +1727,11 @@ impl OrchestratorWakes {
             return;
         }
         if state.hand_off_pending.contains(orch) {
+            return;
+        }
+        if let Some(reset) = limit_reset {
+            drop(state);
+            self.arm_timer(orch, reset);
             return;
         }
         let cancelled = self.inner.event_turns.take_cancelled(orch);

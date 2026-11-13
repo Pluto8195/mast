@@ -450,6 +450,10 @@ pub enum AgentEvent {
         /// Harness-native session id (used for resume).
         session_id: String,
         assistant_message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<String>,
     },
     TextDelta {
         text: String,
@@ -478,6 +482,9 @@ pub enum AgentEvent {
     ToolResult {
         id: String,
         is_error: bool,
+        /// Process exit status, when supplied by the harness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
         /// Tool output text, capped by the emitting harness (ACP tool-call
         /// content; claude/codex adapters never populate it). The doc-side
         /// fold applies its own byte cap before anything persists.
@@ -507,8 +514,13 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    #[serde(rename_all = "camelCase")]
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<i64>,
     },
     /// Harness rejected an unsupported server request. Engine-internal diagnostic.
     #[serde(rename_all = "camelCase")]

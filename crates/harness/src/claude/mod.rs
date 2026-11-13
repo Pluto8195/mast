@@ -1041,6 +1041,9 @@ async fn run_session(session: Session) {
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
+        if let Some(error) = norm.take_pending_limit_error() {
+            let _ = event_tx.send(Ok(error)).await;
+        }
         if interrupted && !done_after_interrupt {
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {

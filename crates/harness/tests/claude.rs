@@ -97,7 +97,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
     let (controls, _steer, _token) = controls("A");
     let events = run_to_end(&harness(), request("scenario:signed-out"), controls).await;
     assert!(events.iter().any(|event| matches!(event,
-        AgentEvent::Error { message } if message == "Authentication failed — sign in to Claude again."
+        AgentEvent::Error { message, .. } if message == "Authentication failed — sign in to Claude again."
     )), "events: {events:?}");
 }
 
@@ -171,6 +171,7 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
             id: "sub-tool".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         }),
     }));
@@ -199,12 +200,14 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
         id: "tool-1".into(),
         is_error: false,
         output: None,
+        exit_code: None,
         diff: None,
     }));
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "tool-2".into(),
         is_error: true,
         output: None,
+        exit_code: None,
         diff: None,
     }));
 
@@ -429,14 +432,11 @@ async fn error_codes_map_to_readable_messages() {
     let errors: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Error { message, .. } => Some(message.as_str()),
             _ => None,
         })
         .collect();
-    assert!(
-        errors.contains(&"Claude usage limit reached — try again after the limit resets."),
-        "assistant error code not mapped: {errors:?}"
-    );
+    assert_eq!(errors.len(), 1, "one error for the same usage limit: {errors:?}");
     assert!(
         errors.contains(
             &"Claude 5-hour limit reached — the turn was blocked. Try again after it resets."

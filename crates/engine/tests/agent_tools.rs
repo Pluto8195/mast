@@ -69,6 +69,8 @@ impl GatedHarness {
             cwd,
             session_id: "sess-agent".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         })]);
         let done = futures::stream::once(async move {
             release.notified().await;
@@ -4064,7 +4066,7 @@ async fn friction_captures_rejected_server_requests() {
 #[tokio::test(flavor = "multi_thread")]
 async fn friction_captures_errored_turn() {
     let rig = rig().await;
-    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
+    *rig.harness.events.lock().unwrap() = vec![AgentEvent::Error { code: None, resets_at: None, message: "password=fake-secret".into() }, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None }];
     rig.core.doc_host.queue_command(CHAT, run_command("test", &rig.space_path)).unwrap();
     wait_for(|| !rig.core.workspace.friction_reports(SPACE).is_empty(), "friction report").await;
     let rows = rig.core.workspace.friction_reports(SPACE);

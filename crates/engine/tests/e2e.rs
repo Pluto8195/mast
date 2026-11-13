@@ -60,6 +60,8 @@ fn mock_script() -> Vec<AgentEvent> {
             cwd: "/tmp".into(),
             session_id: "hs-1".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         },
         AgentEvent::TextDelta { text: "Hel".into() },
         AgentEvent::TextDelta { text: "lo".into() },
@@ -74,6 +76,7 @@ fn mock_script() -> Vec<AgentEvent> {
             id: "tool-1".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         },
         done(DoneStatus::Completed),
@@ -303,6 +306,8 @@ async fn queued_run_command_executes_end_to_end() {
             script: mock_script(),
         }),
     );
+    core.workspace.create_space("space-journal", &core.device_id, "/tmp", None, false).unwrap();
+    core.workspace.create_chat_with_parent(CHAT, Some("space-journal"), Some(&core.device_id), None, None, None).unwrap();
     let handle = core.doc_host.open(CHAT).unwrap();
 
     // Live event subscription (journal replay + broadcast) before anything runs.
@@ -379,6 +384,12 @@ async fn queued_run_command_executes_end_to_end() {
 
     // Journal replay: the full script in order, terminal Done last.
     let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
+    assert!(matches!(&replay[0].event, AgentEvent::SessionStarted { chat_id: None, space_id: None, .. }));
+    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+    let records = journal.replay_records(CHAT, 0).unwrap();
+    assert!(matches!(&records[0].event, AgentEvent::SessionStarted {
+        chat_id: Some(chat), space_id: Some(space), ..
+    } if chat == CHAT && space == "space-journal"));
     assert_eq!(replay.len(), mock_script().len());
     assert!(matches!(
         replay.last().map(|j| &j.event),
@@ -2041,6 +2052,8 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
         cwd: "/tmp".into(),
         session_id: "hs-hb".into(),
         assistant_message_id: "a-hb".into(),
+        chat_id: None,
+        space_id: None,
     }];
     // A long "silent" stretch: redacted thinking / input_json_delta windows
     // stream as empty reasoning deltas.
@@ -2170,6 +2183,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             cwd: "/tmp".into(),
             session_id: "hs-steer".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         },
         AgentEvent::TextDelta {
             text: "part one".into(),
@@ -2199,6 +2214,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             id: "tool-long".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
@@ -2593,6 +2609,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             id: "image-1".into(),
             is_error: false,
             output: None,
+            exit_code: None,
             diff: None,
         },
         image.clone(),

@@ -198,7 +198,7 @@ case "$turnline" in
   emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
   emit '{"method":"item/completed","params":{"item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
   emit '{"method":"item/started","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","arguments":{"q":"bug"}}}}'
-  emit '{"method":"item/completed","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","status":"failed"}}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","status":"failed","error":{"message":"MCP request failed"}}}}'
   emit '{"method":"item/started","params":{"item":{"id":"w1","type":"webSearch","query":"rust"}}}'
   emit '{"method":"item/completed","params":{"item":{"id":"w1","type":"webSearch","query":"rust"}}}'
   # Completion-only lifecycle: must still open AND close the tool call.

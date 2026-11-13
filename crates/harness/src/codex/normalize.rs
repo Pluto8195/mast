@@ -226,6 +226,7 @@ fn tool_lifecycle(phase: Phase, id: String, call: ToolCall, is_error: bool) -> V
                 id,
                 is_error,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
         ],
@@ -447,12 +448,13 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     id: id.clone(),
                     is_error: error.is_some(),
                     output: None,
+                    exit_code: None,
                     diff: None,
                 },
             ];
             if let Some(message) = error {
                 events.push(AgentEvent::Error {
-                    message: message.into(),
+                    code: None, resets_at: None, message: message.into(),
                 });
             } else {
                 let name = std::path::Path::new(&path)
@@ -479,15 +481,16 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => {
                 let exit_code = field(item, &["exitCode", "exit_code"])
                     .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                    .and_then(|value| i32::try_from(value).ok());
                 let output = field(item, &["aggregatedOutput", "aggregated_output"])
                     .and_then(Value::as_str)
                     .filter(|text| !text.is_empty())
                     .map(cap_output);
                 vec![AgentEvent::ToolResult {
                     id,
-                    is_error: status == "failed" || exit_code != 0,
+                    is_error: status == "failed" || exit_code.is_some_and(|code| code != 0),
                     output,
+                    exit_code,
                     diff: None,
                 }]
             }
@@ -517,6 +520,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                         id,
                         is_error,
                         output: None,
+                        exit_code: None,
                         diff: (!is_error)
                             .then(|| file_change_diff(&raw_changes))
                             .flatten(),
@@ -539,7 +543,12 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => vec![AgentEvent::ToolResult {
                 id,
                 is_error: status == "failed",
-                output: None,
+                output: (status == "failed").then(|| ["error", "result"].iter().filter_map(|key| item.get(*key))
+                    .filter(|value| !value.is_null())
+                    .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
+                    .reduce(|a, b| format!("{a}\n{b}"))
+                    .map(|text| cap_output(&text))).flatten(),
+                exit_code: None,
                 diff: None,
             }],
         },
@@ -566,7 +575,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             tool_lifecycle(phase, id, ToolCall::Todo { items }, false)
         }
         "error" => vec![AgentEvent::Error {
-            message: str_field(item, &["message"]),
+            code: None, resets_at: None, message: str_field(item, &["message"]),
         }],
         "collabAgentToolCall" | "collab_agent_tool_call" => {
             let tool = str_field(item, &["tool"]);
@@ -785,7 +794,7 @@ impl ChildStream {
                 }]
             }
             "error" => vec![AgentEvent::Error {
-                message: params
+                code: None, resets_at: None, message: params
                     .pointer("/error/message")
                     .and_then(Value::as_str)
                     .or_else(|| params.get("message").and_then(Value::as_str))
@@ -975,6 +984,15 @@ mod tests {
     }
 
     #[test]
+    fn successful_mcp_results_do_not_expose_output() {
+        let events = map_item(Phase::Completed, &json!({
+            "type": "mcpToolCall", "id": "mcp", "status": "completed",
+            "result": {"content": [{"type": "text", "text": "private content"}]}
+        }));
+        assert!(matches!(&events[..], [AgentEvent::ToolResult { is_error: false, output: None, .. }]));
+    }
+
+    #[test]
     fn command_execution_maps_exit_code_to_error() {
         let started = map_item(
             Phase::Started,
@@ -999,6 +1017,7 @@ mod tests {
                 id: "c1".into(),
                 is_error: true,
                 output: None,
+                exit_code: Some(2),
                 diff: None,
             }]
         );
@@ -1042,6 +1061,7 @@ mod tests {
                     id: "f2".into(),
                     is_error: true,
                     output: None,
+                    exit_code: None,
                     diff: None,
                 },
             ]
@@ -1489,7 +1509,7 @@ mod generated_image_tests {
             assert_eq!(
                 events[2],
                 AgentEvent::Error {
-                    message: expected.into()
+                    code: None, resets_at: None, message: expected.into()
                 }
             );
         }

@@ -1,6 +1,6 @@
 //! Per-Space friction reports.
 use super::*;
-use mast_proto::{FrictionReport, FrictionStatus, derive_id};
+use mast_proto::{FrictionOccurrence, FrictionReport, FrictionStatus, derive_id};
 
 pub const KIND_FRICTION_REPORTS: &str = "frictionReports";
 
@@ -25,6 +25,7 @@ pub fn friction_fingerprint(report: &FrictionReport) -> String {
 }
 
 const COUNTER_PREFIX: &str = "occurrence:";
+const OCCURRENCES_KEPT: usize = 50;
 
 fn decode(row: &RegistryRow) -> Option<FrictionReport> {
     let value = Value::Object(row.fields.clone().into_iter().collect());
@@ -39,6 +40,13 @@ fn decode(row: &RegistryRow) -> Option<FrictionReport> {
             .iter()
             .filter_map(|counter| counter.get("count").and_then(Value::as_u64))
             .fold(0, u64::saturating_add);
+        report.occurrence_history = counters.iter()
+            .filter_map(|counter| counter.get("history").and_then(Value::as_array))
+            .flatten().filter_map(|value| serde_json::from_value::<FrictionOccurrence>(value.clone()).ok())
+            .collect();
+        report.occurrence_history.sort_by(|a, b| (a.at, &a.chat_id, &a.space_id).cmp(&(b.at, &b.chat_id, &b.space_id)));
+        let excess = report.occurrence_history.len().saturating_sub(OCCURRENCES_KEPT);
+        report.occurrence_history.drain(..excess);
         report.last_seen = counters
             .iter()
             .filter_map(|counter| counter.get("lastSeen").and_then(Value::as_i64))
@@ -208,7 +216,17 @@ impl RegistryDoc {
             .and_then(Value::as_i64)
             .unwrap_or(report.provenance.created_at)
             .max(report.provenance.created_at);
+        let mut history: Vec<FrictionOccurrence> = counter
+            .and_then(|v| v.get("history"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        history.push(FrictionOccurrence { at: report.provenance.created_at,
+            chat_id: report.provenance.chat_id.clone(), space_id: report.provenance.space_id.clone() });
+        history.sort_by_key(|occurrence| occurrence.at);
+        let excess = history.len().saturating_sub(OCCURRENCES_KEPT);
+        history.drain(..excess);
         report.occurrences = 1;
+        report.occurrence_history.clear();
         report.last_seen = report.provenance.created_at;
         report.status = FrictionStatus::Open;
         let mut fields: BTreeMap<String, Value> = if existing.is_some() {
@@ -219,7 +237,7 @@ impl RegistryDoc {
             };
             map.into_iter().collect()
         };
-        fields.insert(counter_key, json!({"count": count, "lastSeen": last_seen}));
+        fields.insert(counter_key, json!({"count": count, "lastSeen": last_seen, "history": history}));
         self.observe_row(KIND_FRICTION_REPORTS, &report.id);
         let op = RowOp {
             kind: KIND_FRICTION_REPORTS.into(),
@@ -273,6 +291,7 @@ mod tests {
             },
             fingerprint: String::new(),
             occurrences: 0,
+            occurrence_history: Vec::new(),
             last_seen: 0,
             status: FrictionStatus::Open,
             promoted_item_id: None,
@@ -290,9 +309,11 @@ mod tests {
         let mut value = serde_json::to_value(&first).unwrap();
         value.as_object_mut().unwrap().remove("promotedItemId");
         value.as_object_mut().unwrap().remove("promotedAt");
+        value.as_object_mut().unwrap().remove("occurrenceHistory");
         let legacy: FrictionReport = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.promoted_item_id, None);
         assert_eq!(legacy.promoted_at, None);
+        assert!(legacy.occurrence_history.is_empty());
         let mut promoted = first.clone();
         promoted.promoted_item_id = Some("item".into());
         promoted.promoted_at = Some(42);
@@ -307,6 +328,7 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.occurrences, 2);
         assert_eq!(second.last_seen, 2);
+        assert_eq!(second.occurrence_history.iter().map(|o| (o.at, o.chat_id.as_str(), o.space_id.as_str())).collect::<Vec<_>>(), vec![(1, "chat-1", "space"), (2, "chat-2", "space")]);
         assert_eq!(second.provenance.chat_id, "chat-1");
         let other = doc
             .record_friction(report("other", "chat-2", "test failure", 3))
@@ -316,6 +338,19 @@ mod tests {
         let restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "device").unwrap();
         assert_eq!(restored.friction_reports("space"), vec![second]);
     }
+    #[test]
+    fn friction_history_keeps_the_latest_fifty_occurrences() {
+        let mut doc = RegistryDoc::new("device");
+        for at in 0..55 {
+            doc.record_friction(report("space", "chat", "failure", at)).unwrap();
+        }
+        let report = doc.friction_reports("space").pop().unwrap();
+        assert_eq!(report.occurrences, 55);
+        assert_eq!(report.occurrence_history.len(), 50);
+        assert_eq!(report.occurrence_history.first().unwrap().at, 5);
+        assert_eq!(report.occurrence_history.last().unwrap().at, 54);
+    }
+
     #[test]
     fn friction_concurrent_devices_preserve_occurrences() {
         let mut first = RegistryDoc::new("device-a");
@@ -332,6 +367,7 @@ mod tests {
         let merged = decode(&merged).unwrap();
         assert_eq!(merged.occurrences, 2);
         assert_eq!(merged.last_seen, 2);
+        assert_eq!(merged.occurrence_history.len(), 2);
     }
     #[test]
     fn friction_fingerprint_includes_kind_and_command() {

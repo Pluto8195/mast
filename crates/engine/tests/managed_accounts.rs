@@ -396,6 +396,8 @@ impl Harness for HomeRecorder {
                 cwd: request.cwd,
                 session_id: format!("hs-{}", request.prompt),
                 assistant_message_id: format!("a-{}", request.prompt),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta { text: "ok".into() }),
             Ok(AgentEvent::Done {

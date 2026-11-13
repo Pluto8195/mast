@@ -169,6 +169,8 @@ struct Inner {
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
+    /// Cached reset deadlines; a missing key has not yet been read from the journal.
+    usage_limits: Mutex<HashMap<String, Option<i64>>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
     awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
@@ -346,6 +348,7 @@ impl SessionsEngine {
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
+                usage_limits: Mutex::new(HashMap::new()),
                 sessions_tx,
                 worker_signals,
                 awaiting_inputs: Mutex::new(HashMap::new()),
@@ -598,6 +601,25 @@ impl SessionsEngine {
     /// Harness for the authenticated live run, when it is still active.
     pub fn run_harness(&self, chat_id: &str, run_id: &str) -> Option<HarnessId> {
         lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
+    }
+
+    /// Clamp corrupt or unreasonable reset dates to eight days from observation.
+    fn cap_usage_limit_reset(at: i64) -> i64 {
+        at.min(chrono::Utc::now().timestamp_millis().saturating_add(8 * 24 * 60 * 60 * 1000))
+    }
+
+    /// Reset deadline of the latest usage-limited run, if known.
+    pub(crate) fn usage_limit_reset(&self, chat_id: &str) -> Option<i64> {
+        if let Some(cached) = lock(&self.inner.usage_limits).get(chat_id).copied() {
+            return cached;
+        }
+        let recovered = self.inner.journal.find_rev(chat_id, |_, event| match event {
+            AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
+                if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
+            AgentEvent::SessionStarted { .. } => Some(None),
+            _ => None,
+        }).ok().flatten().flatten().map(Self::cap_usage_limit_reset);
+        *lock(&self.inner.usage_limits).entry(chat_id.to_owned()).or_insert(recovered)
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1801,10 +1823,11 @@ impl Inner {
                             id: id.strip_suffix(":image").unwrap_or(&id).into(),
                             is_error: true,
                             output: None,
+                            exit_code: None,
                             diff: None,
                         },
                         AgentEvent::Error {
-                            message: "Generated image unavailable".into(),
+                            code: None, resets_at: None, message: "Generated image unavailable".into(),
                         },
                     ]
                 }
@@ -1827,13 +1850,31 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
-        let seq = match self.journal.append(chat_id, event) {
+        let mut journal_event = event.clone();
+        if let AgentEvent::SessionStarted { chat_id: event_chat, space_id, .. } = &mut journal_event {
+            *event_chat = Some(chat_id.to_owned());
+            *space_id = self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten())
+                .and_then(|chat| chat.space_id);
+        }
+        let seq = match self.journal.append(chat_id, &journal_event) {
             Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
                 0
             }
         };
+        if seq != 0 {
+            match event {
+                AgentEvent::SessionStarted { .. } => {
+                    lock(&self.usage_limits).insert(chat_id.to_owned(), None);
+                }
+                AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
+                    if code == "usage_5h" || code == "usage_weekly" => {
+                        lock(&self.usage_limits).insert(chat_id.to_owned(), Some(SessionsEngine::cap_usage_limit_reset(*at)));
+                    }
+                _ => {}
+            }
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,
@@ -1981,7 +2022,7 @@ impl Inner {
             id: String::new(), kind, summary: clean(summary, 140), what_happened: clean(detail, 4096),
             workaround: None, suggestion: None, approval: approval.map(|a| mast_proto::FrictionApproval { command: clean(&a.command, 1024), why: clean(&a.why, 2048), answer: a.answer }), severity: None, links: vec![],
             provenance: mast_proto::FrictionProvenance { chat_id: chat_id.to_owned(), harness: clean(&harness, 128), model: chat.actual_model.or_else(|| chat.config.and_then(|c| c.model)).map(|s| clean(&s, 256)), space_id: space_id.clone(), work_item_id: ws.chat_assigned_work_item(chat_id, &space_id), branch: chat.branch.map(|s| clean(&s, 256)), created_at: now, source: mast_proto::FrictionSource::Auto, file_name: None },
-            fingerprint: String::new(), occurrences: 0, last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
+            fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: now, status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
         };
         let result = if durable { ws.record_friction_durable(report) } else { ws.record_friction(report) };
         match result { Ok(row) => Some(row.id), Err(err) => { tracing::warn!(error = %err, "automatic friction capture failed"); None } }
@@ -2868,7 +2909,7 @@ async fn drive_run(
             inner.publish(
                 &chat_id,
                 &AgentEvent::Error {
-                    message: message.clone(),
+                    code: None, resets_at: None, message: message.clone(),
                 },
             );
             inner.publish(
@@ -3197,7 +3238,7 @@ async fn drive_run(
             continue;
         }
         let authentication_error = match &event {
-            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Error { message, .. } => Some(message.as_str()),
             AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } => Some(message.as_str()),
             _ => None,
         };
@@ -3206,7 +3247,7 @@ async fn drive_run(
                 && let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
                     tracing::warn!(%error, "could not record account sign-out");
                 }
-        if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
+        if let AgentEvent::Error { message, .. } = &event { friction_turn_error = Some(message.clone()); }
         if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
             let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");
             inner.capture_friction(&chat_id, mast_proto::FrictionKind::Environment, &format!("Session errored: {detail}"), detail, None);
@@ -3960,6 +4001,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_limit_cache_recovers_updates_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path()).unwrap());
+        let limit = |at| AgentEvent::Error {
+            message: "limit".into(), code: Some("usage_5h".into()), resets_at: Some(at),
+        };
+        journal.append("chat", &limit(123)).unwrap();
+        let engine = SessionsEngine::new("device".into(), journal.clone(), Arc::new(HarnessRegistry::new()));
+        assert_eq!(engine.usage_limit_reset("chat"), Some(123));
+        journal.append("chat", &limit(456)).unwrap();
+        assert_eq!(engine.usage_limit_reset("chat"), Some(123), "lookup uses cache");
+        engine.inner.publish("chat", &limit(i64::MAX));
+        let cap = engine.usage_limit_reset("chat").unwrap();
+        assert!(cap <= chrono::Utc::now().timestamp_millis() + 8 * 24 * 60 * 60 * 1000);
+        engine.inner.publish("chat", &AgentEvent::SessionStarted {
+            harness: HarnessId::Mock, model: String::new(), tools: vec![], cwd: String::new(),
+            session_id: String::new(), assistant_message_id: String::new(), chat_id: None, space_id: None,
+        });
+        assert_eq!(engine.usage_limit_reset("chat"), None);
+    }
+
+    #[test]
     fn retry_recovers_attachment_paths_from_transcript_prompt() {
         assert_eq!(retry_prompt_attachments("hello\n\nAttached images (local files — open them to view):\n- /tmp/one.png\n- /tmp/two.png"), ["/tmp/one.png", "/tmp/two.png"]);
         assert!(retry_prompt_attachments("hello").is_empty());
@@ -4001,6 +4064,8 @@ mod tests {
             cwd: cwd.into(),
             session_id: id.into(),
             assistant_message_id: "a".into(),
+            chat_id: None,
+            space_id: None,
         };
         let done = |id: Option<&str>| AgentEvent::Done {
             status: DoneStatus::Completed,
@@ -4064,6 +4129,7 @@ mod tests {
             id: "call-1".into(),
             is_error: false,
             output: Some("old output".into()),
+            exit_code: None,
             diff: None,
         };
         journal.append("chat-1", &old).unwrap();
@@ -4080,6 +4146,7 @@ mod tests {
                     id: "call-1".into(),
                     is_error: false,
                     output: Some("latest output".into()),
+                    exit_code: None,
                     diff: Some(diff.clone()),
                 },
             )
@@ -4093,6 +4160,7 @@ mod tests {
                         id: "wrapped-call".into(),
                         is_error: false,
                         output: Some("wrapped output".into()),
+                        exit_code: None,
                         diff: Some(diff.clone()),
                     }),
                 },

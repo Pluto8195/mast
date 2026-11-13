@@ -435,7 +435,7 @@ async fn v2_execution_failure_and_interrupt_settle_the_turn() {
         let mut error = None;
         loop {
             match wire.events.recv().await.unwrap().unwrap() {
-                AgentEvent::Error { message } => error = Some(message),
+                AgentEvent::Error { message, .. } => error = Some(message),
                 AgentEvent::Done {
                     status, error: e, ..
                 } => return (status, e.or(error)),

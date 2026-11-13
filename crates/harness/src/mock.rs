@@ -201,7 +201,7 @@ impl Harness for MockHarness {
             .unwrap_or(self.script.len());
         let (body, tail) = self.script.split_at(done_ix);
         let error_event = mock_error.then(|| AgentEvent::Error {
-            message: "Claude usage limit reached — try again after the limit resets.".into(),
+            code: None, resets_at: None, message: "Claude usage limit reached — try again after the limit resets.".into(),
         });
         // Dev/testing knob: `MAST_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for
@@ -302,6 +302,7 @@ impl Harness for MockHarness {
                         id: "mock-think-tool".into(),
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     },
                 ]
@@ -340,6 +341,7 @@ impl Harness for MockHarness {
                     id: id.into(),
                     is_error: false,
                     output: None,
+                    exit_code: None,
                     diff: None,
                 };
                 let done = AgentEvent::Done {
@@ -505,6 +507,7 @@ impl Harness for MockHarness {
                         id: "mock-code-tool".into(),
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     },
                 ]
@@ -784,6 +787,8 @@ impl Harness for InstructionMockHarness {
                 cwd,
                 session_id: session_id.clone(),
                 assistant_message_id: format!("{session_id}-a0"),
+                chat_id: None,
+                space_id: None,
             }));
             let mut prompt = first_prompt;
             let mut turn = 0usize;
@@ -814,6 +819,7 @@ impl Harness for InstructionMockHarness {
                         id: spawn_id,
                         is_error: false,
                         output: None,
+                        exit_code: None,
                         diff: None,
                     }));
                 }

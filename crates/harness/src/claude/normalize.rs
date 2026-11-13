@@ -63,6 +63,27 @@ fn assistant_error_text(code: &str) -> String {
     }
 }
 
+/// Identify explicit usage-limit messages without classifying ordinary replies.
+fn usage_limit_code(text: &str) -> Option<&'static str> {
+    let text = text.to_ascii_lowercase();
+    if !(text.contains("usage limit") || text.contains("rate_limit")
+        || (text.contains("hit your") && text.contains("limit"))) {
+        return None;
+    }
+    if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") || text.contains("7 day") {
+        Some("usage_weekly")
+    } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") || text.contains("five hour") || text.contains("5h") {
+        Some("usage_5h")
+    } else {
+        Some("other")
+    }
+}
+
+fn reset_millis(value: i64) -> Option<i64> {
+    if value < 0 { None } else if value > 1_000_000_000_000 { Some(value) }
+    else { value.checked_mul(1000) }
+}
+
 /// Which claude.ai usage window a `rate_limit_event` refers to.
 fn rate_window_label(kind: &str) -> &'static str {
     match kind {
@@ -227,6 +248,9 @@ fn is_synthetic_user_text(text: &str) -> bool {
 /// resume turns them into the done→Working→done wake.
 pub(crate) struct Normalizer {
     saw_init: bool,
+    /// Hold generic assistant limit errors until a richer rate-limit frame or result arrives.
+    pending_limit_error: Option<AgentEvent>,
+    emitted_limit_error: bool,
     last_model: Option<String>,
     /// Background-agent ids (`task_started.task_id`) → the spawning Agent
     /// tool_use id. `SendMessage` steers address the AGENT id; this map
@@ -252,12 +276,19 @@ impl Normalizer {
     pub fn new() -> Self {
         Self {
             saw_init: false,
+            pending_limit_error: None,
+            emitted_limit_error: false,
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }
+    }
+
+    /// Preserve a buffered assistant error when the process exits without a result.
+    pub(crate) fn take_pending_limit_error(&mut self) -> Option<AgentEvent> {
+        self.pending_limit_error.take()
     }
 
     /// Rotate the assistant message id for a steer boundary; returns
@@ -337,6 +368,8 @@ impl Normalizer {
                     cwd: f.cwd,
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
+                    chat_id: None,
+                    space_id: None,
                 }]
             }
 
@@ -421,7 +454,7 @@ impl Normalizer {
                         out.push(tag(
                             parent,
                             AgentEvent::Error {
-                                message: assistant_error_text(code),
+                                code: usage_limit_code(code).map(str::to_owned), resets_at: None, message: assistant_error_text(code),
                             },
                         ));
                     }
@@ -512,9 +545,17 @@ impl Normalizer {
                 // carries a terse `error` code here — often with empty content
                 // and no `result` error — so surface it visibly.
                 if let Some(code) = &f.error {
-                    out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
-                    });
+                    let limit_text = f.message.blocks().filter(|block| block.kind == "text")
+                        .map(|block| block.text).collect::<Vec<_>>().join(" ");
+                    let limit_code = usage_limit_code(&limit_text).or_else(|| usage_limit_code(code));
+                    let error = AgentEvent::Error {
+                        code: limit_code.map(str::to_owned), resets_at: None, message: assistant_error_text(code),
+                    };
+                    if limit_code.is_some() {
+                        if !self.emitted_limit_error { self.pending_limit_error = Some(error); }
+                    } else {
+                        out.push(error);
+                    }
                 }
                 // The enclosing assistant frame closes the streamed message
                 // item; rotate so post-boundary deltas get a fresh id.
@@ -540,6 +581,7 @@ impl Normalizer {
                                     id: b.tool_use_id.clone(),
                                     is_error: b.is_error.unwrap_or(false),
                                     output: tool_result_output(&b),
+                                    exit_code: b.exit_code,
                                     diff: None,
                                 },
                             )
@@ -569,6 +611,7 @@ impl Normalizer {
                         id: b.tool_use_id.clone(),
                         is_error: b.is_error.unwrap_or(false),
                         output: tool_result_output(&b),
+                        exit_code: b.exit_code,
                         diff: None,
                     })
                     .collect()
@@ -580,9 +623,19 @@ impl Normalizer {
                 if f.rate_limit_info.status != "rejected" {
                     return Vec::new();
                 }
+                if self.emitted_limit_error { return Vec::new(); }
+                self.pending_limit_error = None;
+                self.emitted_limit_error = true;
                 let window =
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
+                let code = match f.rate_limit_info.rate_limit_type.as_deref() {
+                    Some("five_hour") => "usage_5h",
+                    Some(kind) if kind.starts_with("seven_day") => "usage_weekly",
+                    _ => "other",
+                };
                 vec![AgentEvent::Error {
+                    code: Some(code.into()),
+                    resets_at: f.rate_limit_info.resets_at.and_then(reset_millis),
                     message: format!(
                         "Claude {window} limit reached — the turn was blocked. Try again after it resets."
                     ),
@@ -617,7 +670,7 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
-                let done = if f.subtype == "success" {
+                let mut done = if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {
                             DoneStatus::Interrupted
@@ -685,6 +738,25 @@ impl Normalizer {
                         window: Some(window),
                     });
                 }
+                if !self.emitted_limit_error {
+                    let result_error = match &done {
+                        AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } =>
+                            usage_limit_code(message).map(|code| AgentEvent::Error {
+                                message: message.clone(), code: Some(code.into()), resets_at: None,
+                            }),
+                        _ => None,
+                    };
+                    if let Some(error) = result_error.or_else(|| self.pending_limit_error.take()) {
+                        out.push(error);
+                    }
+                }
+                if let AgentEvent::Done { error, .. } = &mut done
+                    && error.as_deref().and_then(usage_limit_code).is_some() {
+                    // The structured Error above already carries this message.
+                    *error = None;
+                }
+                self.pending_limit_error = None;
+                self.emitted_limit_error = false;
                 out.extend([usage, done]);
                 out
             }
@@ -748,6 +820,58 @@ mod tests {
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
+    }
+
+    #[test]
+    fn usage_limit_text_and_reset_units_are_classified() {
+        assert_eq!(usage_limit_code("You've hit your limit for the 5-hour window"), Some("usage_5h"));
+        assert_eq!(usage_limit_code("You've hit your weekly usage limit"), Some("usage_weekly"));
+        assert_eq!(usage_limit_code("You've hit your 5-hour limit"), Some("usage_5h"));
+        assert_eq!(usage_limit_code("rate_limit"), Some("other"));
+        assert_eq!(usage_limit_code("weekly report"), None);
+        assert_eq!(reset_millis(1_786_985_400), Some(1_786_985_400_000));
+        assert_eq!(reset_millis(1_786_985_400_000), Some(1_786_985_400_000));
+        assert_eq!(reset_millis(-1), None);
+        let events = normalize_one(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Documentation on rate_limit and usage limit"}]}}"#);
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::Error { .. })));
+        let events = normalize_one(r#"{"type":"result","subtype":"error_during_execution","errors":["You've hit your 5-hour limit"]}"#);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Error { code: Some(code), resets_at: None, .. } if code == "usage_5h")));
+    }
+
+    #[test]
+    fn usage_limit_frames_emit_one_error_with_reset() {
+        let mut normalizer = Normalizer::new();
+        let frames = [
+            r#"{"type":"assistant","error":"rate_limit","message":{"content":[]}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1786985400}}"#,
+            r#"{"type":"result","subtype":"error_during_execution","errors":["You've hit your 5-hour limit"]}"#,
+        ];
+        let events: Vec<_> = frames.into_iter().flat_map(|raw|
+            normalizer.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false)).collect();
+        let errors: Vec<_> = events.iter().filter(|event| matches!(event, AgentEvent::Error { .. })).collect();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], AgentEvent::Error { code: Some(code), resets_at: Some(1_786_985_400_000), .. } if code == "usage_5h"));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Done { status: DoneStatus::Errored, error: None, .. })));
+    }
+
+    #[test]
+    fn assistant_limit_without_result_can_be_flushed() {
+        let mut normalizer = Normalizer::new();
+        let frame = crate::claude::wire::parse_frame(r#"{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your weekly usage limit"}]}}"#).unwrap();
+        normalizer.normalize(frame, false);
+        assert!(matches!(normalizer.take_pending_limit_error(), Some(AgentEvent::Error { code: Some(code), .. }) if code == "usage_weekly"));
+    }
+
+    #[test]
+    fn rejected_usage_windows_include_reset_deadlines() {
+        for (kind, expected) in [("five_hour", "usage_5h"), ("seven_day", "usage_weekly")] {
+            let raw = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"{kind}","resetsAt":1786985400}}}}"#);
+            assert!(matches!(&normalize_one(&raw)[0], AgentEvent::Error {
+                code: Some(code), resets_at: Some(1_786_985_400_000), ..
+            } if code == expected));
+        }
+        let events = normalize_one(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#);
+        assert!(matches!(&events[0], AgentEvent::Error { resets_at: None, .. }));
     }
 
     fn result_done(raw: &str) -> AgentEvent {
@@ -853,6 +977,7 @@ mod tests {
                     id: "t1".into(),
                     is_error: false,
                     output: Some("command output\n".into()),
+                    exit_code: None,
                     diff: None,
                 }),
             }]
@@ -870,6 +995,7 @@ mod tests {
                 id: "t1".into(),
                 is_error: false,
                 output: Some("first\nsecond".into()),
+                exit_code: None,
                 diff: None,
             }]
         );

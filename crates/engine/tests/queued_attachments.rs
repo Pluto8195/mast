@@ -73,6 +73,8 @@ impl Harness for AckHarness {
                 cwd: request.cwd.clone(),
                 session_id: "sess-qa".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta { text: "ack".into() }),
             Ok(AgentEvent::Done {

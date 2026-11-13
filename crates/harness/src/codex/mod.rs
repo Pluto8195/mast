@@ -945,7 +945,7 @@ fn rotate(id: &mut String) -> (String, String) {
 
 fn normalize_authentication_event(ev: &mut AgentEvent) {
     match ev {
-        AgentEvent::Error { message } | AgentEvent::Done { error: Some(message), .. } => {
+        AgentEvent::Error { message, .. } | AgentEvent::Done { error: Some(message), .. } => {
             *message = normalize::authentication_error_message(std::mem::take(message));
         }
         AgentEvent::Subagent { event, .. } => normalize_authentication_event(event),
@@ -1234,6 +1234,8 @@ async fn run_session(session: Session) {
             cwd: request.cwd.clone(),
             session_id: thread_id.clone(),
             assistant_message_id: assistant_message_id.clone(),
+            chat_id: None,
+            space_id: None,
         },
     )
     .await
@@ -1540,7 +1542,7 @@ async fn run_session(session: Session) {
                             .or_else(|| params.get("message").and_then(Value::as_str))
                             .unwrap_or("Codex error")
                             .to_owned();
-                        if !send(&event_tx, AgentEvent::Error { message }).await {
+                        if !send(&event_tx, AgentEvent::Error { message, code: None, resets_at: None }).await {
                             break 'main;
                         }
                     }
@@ -1754,7 +1756,7 @@ async fn steer_as_new_turn(
             let _ = send(
                 event_tx,
                 AgentEvent::Error {
-                    message: format!("Steering failed: {e}"),
+                    code: None, resets_at: None, message: format!("Steering failed: {e}"),
                 },
             )
             .await;

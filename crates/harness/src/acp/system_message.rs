@@ -265,6 +265,7 @@ mod tests {
                 id: "background-task".into(),
                 is_error: false,
                 output: None,
+                exit_code: None,
                 diff: None,
             },
         ];
