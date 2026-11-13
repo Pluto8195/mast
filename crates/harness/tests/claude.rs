@@ -97,7 +97,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
     let (controls, _steer, _token) = controls("A");
     let events = run_to_end(&harness(), request("scenario:signed-out"), controls).await;
     assert!(events.iter().any(|event| matches!(event,
-        AgentEvent::Error { message } if message == "Authentication failed — sign in to Claude again."
+        AgentEvent::Error { message, .. } if message == "Authentication failed — sign in to Claude again."
     )), "events: {events:?}");
 }
 
@@ -432,7 +432,7 @@ async fn error_codes_map_to_readable_messages() {
     let errors: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Error { message, .. } => Some(message.as_str()),
             _ => None,
         })
         .collect();

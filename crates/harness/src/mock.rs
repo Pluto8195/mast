@@ -201,7 +201,7 @@ impl Harness for MockHarness {
             .unwrap_or(self.script.len());
         let (body, tail) = self.script.split_at(done_ix);
         let error_event = mock_error.then(|| AgentEvent::Error {
-            message: "Claude usage limit reached — try again after the limit resets.".into(),
+            code: None, resets_at: None, message: "Claude usage limit reached — try again after the limit resets.".into(),
         });
         // Dev/testing knob: `MAST_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for

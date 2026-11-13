@@ -1196,6 +1196,27 @@ impl OrchestratorWakes {
 
     async fn continue_worker(&self, session: &Session, start: TurnStart) {
         let worker = &session.chat_id;
+        if let Some(reset) = self.inner.sessions.usage_limit_reset(worker).filter(|at| *at > self.now()) {
+            let this = self.clone();
+            let session = session.clone();
+            let delay = (reset - self.now()) as u64;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                if let Some(current) = this.inner.sessions.session_status(&session.chat_id)
+                    && current.status == SessionStatus::Idle
+                    && current.last_completed_turn == session.last_completed_turn
+                    && this.inner.sessions.usage_limit_reset(&session.chat_id).is_none_or(|at| at <= this.now())
+                {
+                    this.continue_worker_ready(&current, start).await;
+                }
+            });
+            return;
+        }
+        self.continue_worker_ready(session, start).await;
+    }
+
+    async fn continue_worker_ready(&self, session: &Session, start: TurnStart) {
+        let worker = &session.chat_id;
         if !self.hosted_here(worker) || session.status != SessionStatus::Idle {
             return;
         }
@@ -1651,6 +1672,10 @@ impl OrchestratorWakes {
     fn evaluate_blocking(&self, orch: &str, force: bool) {
         let now = self.now();
         let ctx = self.ctx(orch);
+        if let Some(reset) = self.inner.sessions.usage_limit_reset(orch).filter(|at| *at > now) {
+            self.arm_timer(orch, reset);
+            return;
+        }
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);

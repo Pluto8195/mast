@@ -514,8 +514,13 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    #[serde(rename_all = "camelCase")]
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<i64>,
     },
     /// Harness rejected an unsupported server request. Engine-internal diagnostic.
     #[serde(rename_all = "camelCase")]

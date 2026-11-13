@@ -423,7 +423,7 @@ impl Normalizer {
                         out.push(tag(
                             parent,
                             AgentEvent::Error {
-                                message: assistant_error_text(code),
+                                code: None, resets_at: None, message: assistant_error_text(code),
                             },
                         ));
                     }
@@ -515,7 +515,7 @@ impl Normalizer {
                 // and no `result` error — so surface it visibly.
                 if let Some(code) = &f.error {
                     out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
+                        code: None, resets_at: None, message: assistant_error_text(code),
                     });
                 }
                 // The enclosing assistant frame closes the streamed message
@@ -586,7 +586,14 @@ impl Normalizer {
                 }
                 let window =
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
+                let code = match f.rate_limit_info.rate_limit_type.as_deref() {
+                    Some("five_hour") => "usage_5h",
+                    Some(kind) if kind.starts_with("seven_day") => "usage_weekly",
+                    _ => "other",
+                };
                 vec![AgentEvent::Error {
+                    code: Some(code.into()),
+                    resets_at: f.rate_limit_info.resets_at.and_then(|seconds| seconds.checked_mul(1000)),
                     message: format!(
                         "Claude {window} limit reached — the turn was blocked. Try again after it resets."
                     ),
@@ -752,6 +759,18 @@ mod tests {
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
+    }
+
+    #[test]
+    fn rejected_usage_windows_include_reset_deadlines() {
+        for (kind, expected) in [("five_hour", "usage_5h"), ("seven_day", "usage_weekly")] {
+            let raw = format!(r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"{kind}","resetsAt":1786985400}}}}"#);
+            assert!(matches!(&normalize_one(&raw)[0], AgentEvent::Error {
+                code: Some(code), resets_at: Some(1_786_985_400_000), ..
+            } if code == expected));
+        }
+        let events = normalize_one(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#);
+        assert!(matches!(&events[0], AgentEvent::Error { resets_at: None, .. }));
     }
 
     fn result_done(raw: &str) -> AgentEvent {

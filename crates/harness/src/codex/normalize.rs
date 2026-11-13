@@ -454,7 +454,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             ];
             if let Some(message) = error {
                 events.push(AgentEvent::Error {
-                    message: message.into(),
+                    code: None, resets_at: None, message: message.into(),
                 });
             } else {
                 let name = std::path::Path::new(&path)
@@ -575,7 +575,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             tool_lifecycle(phase, id, ToolCall::Todo { items }, false)
         }
         "error" => vec![AgentEvent::Error {
-            message: str_field(item, &["message"]),
+            code: None, resets_at: None, message: str_field(item, &["message"]),
         }],
         "collabAgentToolCall" | "collab_agent_tool_call" => {
             let tool = str_field(item, &["tool"]);
@@ -794,7 +794,7 @@ impl ChildStream {
                 }]
             }
             "error" => vec![AgentEvent::Error {
-                message: params
+                code: None, resets_at: None, message: params
                     .pointer("/error/message")
                     .and_then(Value::as_str)
                     .or_else(|| params.get("message").and_then(Value::as_str))
@@ -1500,7 +1500,7 @@ mod generated_image_tests {
             assert_eq!(
                 events[2],
                 AgentEvent::Error {
-                    message: expected.into()
+                    code: None, resets_at: None, message: expected.into()
                 }
             );
         }

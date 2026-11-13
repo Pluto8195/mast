@@ -600,6 +600,16 @@ impl SessionsEngine {
         lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
     }
 
+    /// Reset deadline of the latest usage-limited run, if known.
+    pub(crate) fn usage_limit_reset(&self, chat_id: &str) -> Option<i64> {
+        self.inner.journal.find_rev(chat_id, |_, event| match event {
+            AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
+                if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
+            AgentEvent::SessionStarted { .. } => Some(None),
+            _ => None,
+        }).ok().flatten().flatten()
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
@@ -1805,7 +1815,7 @@ impl Inner {
                             diff: None,
                         },
                         AgentEvent::Error {
-                            message: "Generated image unavailable".into(),
+                            code: None, resets_at: None, message: "Generated image unavailable".into(),
                         },
                     ]
                 }
@@ -2875,7 +2885,7 @@ async fn drive_run(
             inner.publish(
                 &chat_id,
                 &AgentEvent::Error {
-                    message: message.clone(),
+                    code: None, resets_at: None, message: message.clone(),
                 },
             );
             inner.publish(
@@ -3204,7 +3214,7 @@ async fn drive_run(
             continue;
         }
         let authentication_error = match &event {
-            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Error { message, .. } => Some(message.as_str()),
             AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } => Some(message.as_str()),
             _ => None,
         };
@@ -3213,7 +3223,7 @@ async fn drive_run(
                 && let Err(error) = accounts.mark_chat_signed_out(&chat_id, harness_id) {
                     tracing::warn!(%error, "could not record account sign-out");
                 }
-        if let AgentEvent::Error { message } = &event { friction_turn_error = Some(message.clone()); }
+        if let AgentEvent::Error { message, .. } = &event { friction_turn_error = Some(message.clone()); }
         if let AgentEvent::Done { status: DoneStatus::Errored, error, .. } = &event {
             let detail = error.as_deref().filter(|text| !text.trim().is_empty()).or(friction_turn_error.as_deref().filter(|text| !text.trim().is_empty())).unwrap_or("Session errored");
             inner.capture_friction(&chat_id, mast_proto::FrictionKind::Environment, &format!("Session errored: {detail}"), detail, None);

@@ -2911,7 +2911,7 @@ async fn run_session(session: Session) {
                         "session/load failed (starting fresh): {e}"
                     );
                     let _ = send(&event_tx, AgentEvent::Error {
-                        message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
+                        code: None, resets_at: None, message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
                     }).await;
                     let new = new_session(
                         &client,
@@ -3959,7 +3959,7 @@ async fn run_session(session: Session) {
                 let _ = send(
                     &event_tx,
                     AgentEvent::Error {
-                        message: format!(
+                        code: None, resets_at: None, message: format!(
                             "{agent_name} did not respond to the prompt at all \
                              (no wire activity for {}s). {}",
                             prompt_stall.map(|d| d.as_secs()).unwrap_or(0),

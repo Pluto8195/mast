@@ -21,6 +21,24 @@ use mast_proto::{
 const ORCH: &str = "orch";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_holds_orchestrator_wakes_until_reset() {
+    let rig = Rig::new().await;
+    let journals = rig.store.parent().unwrap().join("data/orgs/dev-org/dev-user/journals");
+    let journal = mast_engine::RunJournal::open(journals).unwrap();
+    journal.append(ORCH, &AgentEvent::Error {
+        message: "limit".into(), code: Some("usage_5h".into()), resets_at: Some(2_000_000),
+    }).unwrap();
+    rig.wakes.report_to_parent("w1", "held report").await.unwrap();
+    rig.wakes.evaluate(ORCH, true).await;
+    assert!(rig.wake_prompts().is_empty());
+    assert_eq!(rig.wakes.status(ORCH).held.len(), 1);
+    rig.clock.store(2_000_000, Ordering::SeqCst);
+    rig.wakes.evaluate(ORCH, true).await;
+    rig.wait_for(|| rig.wake_prompts().iter().any(|p| p.contains("held report")), "wake after reset").await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_wake_row_is_reclaimed_again_after_crash_and_unarchive() {
     let rig = Rig::new().await;
     rig.wakes.report_to_parent("w1", "discard this queued report").await.unwrap();
@@ -622,6 +640,31 @@ async fn waiting_period_raises_one_notice_without_starting_a_worker() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].text, "Waiting period ended: Observation");
     assert!(rig.wake_prompts().is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_defers_worker_continuation_until_reset() {
+    let rig = Rig::new().await;
+    auto_continue_worker(&rig, "limited-worker", "active");
+    rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
+    rig.core.doc_host.queue_message("limited-worker", "begin", Vec::new()).unwrap();
+    rig.wait_for(|| rig.core.sessions.turn_in_flight("limited-worker"), "worker start").await;
+    let started = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[started]).await;
+    let journals = rig.store.parent().unwrap().join("data/orgs/dev-org/dev-user/journals");
+    let journal = mast_engine::RunJournal::open(journals).unwrap();
+    journal.append("limited-worker", &AgentEvent::Error {
+        message: "limit".into(), code: Some("usage_weekly".into()), resets_at: Some(1_000_500),
+    }).unwrap();
+    let _ = rig.finish.send(());
+    rig.wait_for(|| !rig.core.sessions.turn_in_flight("limited-worker"), "worker finish").await;
+    let done = rig.core.sessions.session_status("limited-worker").unwrap();
+    rig.wakes.ingest_sessions(&[done]).await;
+    assert!(!rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue")));
+    rig.clock.store(1_000_500, Ordering::SeqCst);
+    rig.wait_for(|| rig.prompts.lock().unwrap().iter().any(|p| p.contains("auto-continue")), "continuation after reset").await;
+    let _ = rig.finish.send(());
     rig.core.shutdown().await;
 }
 

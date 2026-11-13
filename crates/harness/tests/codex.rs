@@ -116,7 +116,7 @@ async fn signed_out_cli_emits_actionable_authentication_error() {
         let (controls, _steer, _token) = controls("Yes");
         let events = run_to_end(&harness(), request(&format!("scenario:{scenario}")), controls).await;
         assert!(events.iter().any(|event| matches!(event,
-            AgentEvent::Error { message } | AgentEvent::Done { error: Some(message), .. }
+            AgentEvent::Error { message, .. } | AgentEvent::Done { error: Some(message), .. }
                 if message == "Authentication failed — sign in to Codex again."
         )), "{scenario}: {events:?}");
     }

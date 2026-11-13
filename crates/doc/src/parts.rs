@@ -498,7 +498,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
-        AgentEvent::Error { message } => {
+        AgentEvent::Error { message, .. } => {
             let id = format!("e{}", out.len());
             out.push(MessagePart::Error {
                 id,
