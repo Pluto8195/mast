@@ -281,7 +281,11 @@ pub(crate) fn settings_choice(
         } else {
             gpui::FontWeight::NORMAL
         })
-        .text_color(if selected && horizon {
+        .text_color(if selected
+            && (horizon || crate::theme::contrast_ratio(theme.accent, theme.bg) < 4.5)
+        {
+            // A pale accent (Horizon, or a light accent on a light theme)
+            // would read fainter than the unselected labels.
             theme.text
         } else if selected {
             theme.accent
