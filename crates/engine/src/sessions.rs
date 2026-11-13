@@ -4001,6 +4001,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_limit_cache_recovers_updates_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path()).unwrap());
+        let limit = |at| AgentEvent::Error {
+            message: "limit".into(), code: Some("usage_5h".into()), resets_at: Some(at),
+        };
+        journal.append("chat", &limit(123)).unwrap();
+        let engine = SessionsEngine::new("device".into(), journal.clone(), Arc::new(HarnessRegistry::new()));
+        assert_eq!(engine.usage_limit_reset("chat"), Some(123));
+        journal.append("chat", &limit(456)).unwrap();
+        assert_eq!(engine.usage_limit_reset("chat"), Some(123), "lookup uses cache");
+        engine.inner.publish("chat", &limit(i64::MAX));
+        let cap = engine.usage_limit_reset("chat").unwrap();
+        assert!(cap <= chrono::Utc::now().timestamp_millis() + 8 * 24 * 60 * 60 * 1000);
+        engine.inner.publish("chat", &AgentEvent::SessionStarted {
+            harness: HarnessId::Mock, model: String::new(), tools: vec![], cwd: String::new(),
+            session_id: String::new(), assistant_message_id: String::new(), chat_id: None, space_id: None,
+        });
+        assert_eq!(engine.usage_limit_reset("chat"), None);
+    }
+
+    #[test]
     fn retry_recovers_attachment_paths_from_transcript_prompt() {
         assert_eq!(retry_prompt_attachments("hello\n\nAttached images (local files — open them to view):\n- /tmp/one.png\n- /tmp/two.png"), ["/tmp/one.png", "/tmp/two.png"]);
         assert!(retry_prompt_attachments("hello").is_empty());
