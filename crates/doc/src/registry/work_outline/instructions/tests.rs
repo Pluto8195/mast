@@ -122,6 +122,23 @@ fn restore_instruction_preserves_identity_and_text() {
     assert_eq!(row.text, "Keep this rule");
 }
 
+#[test]
+fn restore_instruction_checks_current_budget() {
+    let mut doc = doc_with_spaces("device");
+    let id = instruct(&mut doc, "original", None, "Original");
+    apply(&mut doc, WorkOutlineMutation::ArchiveWorkItemInstruction(ArchiveWorkItemInstructionParams {
+        instruction_id: id.clone(), operation_id: "archive-original".into(),
+    })).unwrap();
+    for index in 0..limits::MAX_REVISION_ENTRIES {
+        instruct(&mut doc, &format!("replacement-{index}"), None, "Rule");
+    }
+    let error = apply(&mut doc, WorkOutlineMutation::RestoreWorkItemInstruction(RestoreWorkItemInstructionParams {
+        instruction_id: id.clone(), operation_id: "restore-original".into(),
+    })).unwrap_err();
+    assert_eq!(error.code, WorkOutlineErrorCode::LimitExceeded);
+    assert!(doc.instructions_of_space(SPACE).iter().find(|row| row.id == id).unwrap().archived());
+}
+
 fn edit(doc: &mut RegistryDoc, op: &str, id: &str, text: &str) -> Outcome<WorkOutlineMutateReply> {
     apply(
         doc,
