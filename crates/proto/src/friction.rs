@@ -64,6 +64,14 @@ pub struct FrictionProvenance {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FrictionOccurrence {
+    pub at: i64,
+    pub chat_id: String,
+    pub space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FrictionReport {
     pub id: String,
     pub kind: FrictionKind,
@@ -78,6 +86,8 @@ pub struct FrictionReport {
     pub provenance: FrictionProvenance,
     pub fingerprint: String,
     pub occurrences: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub occurrence_history: Vec<FrictionOccurrence>,
     pub last_seen: i64,
     pub status: FrictionStatus,
     #[serde(default)]

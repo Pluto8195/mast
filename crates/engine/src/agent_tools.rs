@@ -1203,6 +1203,7 @@ impl AgentToolsService {
             },
             fingerprint: String::new(),
             occurrences: 0,
+            occurrence_history: Vec::new(),
             last_seen: now,
             status: mast_proto::FrictionStatus::Open,
             promoted_item_id: None,

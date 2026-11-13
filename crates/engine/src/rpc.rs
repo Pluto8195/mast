@@ -3182,7 +3182,7 @@ impl RpcService for EngineRpc {
                             space_id: p.space_id.clone(), work_item_id: None, branch: None,
                             created_at: entry.created_at, source: mast_proto::FrictionSource::Import,
                             file_name: Some(filename.clone()),
-                        }, fingerprint: String::new(), occurrences: 0, last_seen: entry.created_at,
+                        }, fingerprint: String::new(), occurrences: 0, occurrence_history: Vec::new(), last_seen: entry.created_at,
                         status: mast_proto::FrictionStatus::Open, promoted_item_id: None, promoted_at: None,
                     };
                     let fingerprint = mast_doc::registry::friction::friction_fingerprint(&report);
