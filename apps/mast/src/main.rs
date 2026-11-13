@@ -634,6 +634,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
             }
         }
     } else {
+        let _ = std::fs::remove_file(dir.join(format!("mast-{mode}.log.old")));
         #[cfg(unix)]
         sweep_stale_overflow_logs(dir, mode);
     }
@@ -671,18 +672,37 @@ impl LogState {
     fn prepare(&mut self, today: u64) -> std::io::Result<()> {
         use std::io::{Read, Seek, SeekFrom, Write};
         if self.canonical && self.day < today {
+            let previous_day = self.day;
+            // Once rotation starts, never touch the canonical path again on failure.
+            self.day = today;
+            self.canonical = false;
             let current = log_path(&self.dir, &self.mode);
-            let archive = self.dir.join(format!("mast-{}.day-{}.log", self.mode, self.day));
-            std::fs::rename(&current, archive)?;
-            let replacement = std::fs::OpenOptions::new().read(true).append(true).create(true).open(&current)?;
-            #[cfg(unix)] {
-                use std::os::fd::AsRawFd;
-                if unsafe { libc::flock(replacement.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                    return Err(std::io::Error::last_os_error());
+            let archive = self.dir.join(format!("mast-{}.day-{}.log", self.mode, previous_day));
+            let rotate = || -> std::io::Result<std::fs::File> {
+                std::fs::rename(&current, archive)?;
+                let replacement = std::fs::OpenOptions::new().read(true).append(true).create(true).open(&current)?;
+                #[cfg(unix)] {
+                    use std::os::fd::AsRawFd;
+                    if unsafe { libc::flock(replacement.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(replacement)
+            };
+            match rotate() {
+                Ok(file) => { self.file = file; self.canonical = true; }
+                Err(_) => {
+                    let path = self.dir.join(format!("mast-{}.{}.log", self.mode, std::process::id()));
+                    let fallback = std::fs::OpenOptions::new().read(true).append(true).create(true).open(path)?;
+                    #[cfg(unix)] {
+                        use std::os::fd::AsRawFd;
+                        if unsafe { libc::flock(fallback.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    self.file = fallback;
                 }
             }
-            self.file = replacement;
-            self.day = today;
         }
         if self.canonical && self.swept_day != Some(today) {
             let prefix = format!("mast-{}.day-", self.mode);
@@ -730,6 +750,24 @@ mod log_file_tests {
         assert!(dir.path().join(format!("mast-headed.day-{day}.log")).exists());
         state.prepare(day + 7).unwrap();
         assert!(!dir.path().join(format!("mast-headed.day-{day}.log")).exists());
+    }
+
+    #[test]
+    fn failed_rotation_switches_to_overflow_without_retrying_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mast-headed.log.old"), b"legacy").unwrap();
+        let log = open_log_file_in(dir.path(), "headed").unwrap();
+        assert!(!dir.path().join("mast-headed.log.old").exists());
+        let mut state = log.state.lock().unwrap();
+        let day = state.day;
+        std::fs::create_dir(dir.path().join(format!("mast-headed.day-{day}.log"))).unwrap();
+        state.prepare(day + 1).unwrap();
+        assert!(!state.canonical);
+        assert_eq!(state.day, day + 1);
+        state.file.write_all(b"overflow").unwrap();
+        state.prepare(day + 2).unwrap();
+        assert_eq!(std::fs::read(dir.path().join(format!("mast-headed.{}.log", std::process::id()))).unwrap(), b"overflow");
+        assert!(dir.path().join("mast-headed.log").is_file());
     }
 
     #[test]
