@@ -988,6 +988,45 @@ impl WorkspaceHost {
         })
     }
 
+    /// Validate inverses against a staged snapshot, then undo under one lock.
+    pub(crate) fn undo_workflow_pack_batch(
+        &self,
+        space_id: &str,
+        receipt: &[crate::workflow_pack::WorkflowPackMutationPair],
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<(), String> {
+        if crate::work_outline::writes_disabled() || actor.kind != mast_proto::WorkOutlineActorKind::User {
+            return Err("Workflow pack undo is not authorized".into());
+        }
+        let synced = self.registry_synced();
+        let now = Utc::now().timestamp_millis();
+        self.mutate(|doc| {
+            let bytes = doc.to_bytes().map_err(|error| error.to_string())?;
+            let mut staged = RegistryDoc::from_bytes(&bytes, doc.device_id()).map_err(|error| error.to_string())?;
+            for pair in receipt.iter().rev() {
+                let snapshot = staged.work_outline_snapshot(space_id, synced);
+                match &pair.forward {
+                    mast_proto::WorkOutlineMutation::CreateWorkItem(created) => {
+                        let expected = crate::workflow_pack::guard_created_item_undo(&snapshot, created)?;
+                        if expected != pair.inverse { return Err("Item inverse does not match receipt".into()); }
+                    }
+                    mast_proto::WorkOutlineMutation::CreateWorkItemInstruction(created) => {
+                        let addition = crate::workflow_pack::PlannedInstructionAddition {
+                            create: pair.forward.clone(), undo: pair.inverse.clone(), expected_text: created.text.clone(),
+                        };
+                        crate::workflow_pack::guard_instruction_undo(&snapshot, &addition)?;
+                    }
+                    _ => return Err("This workflow pack operation cannot yet be undone".into()),
+                }
+                staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+            }
+            for pair in receipt.iter().rev() {
+                doc.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+            }
+            Ok(())
+        })
+    }
+
     /// [`Self::work_outline_mutate`] for an agent holding a live admin grant
     /// on `admin_space` (the engine re-checks the grant per call).
     pub fn work_outline_mutate_admin(
@@ -2826,6 +2865,17 @@ mod tests {
         let after = host.read(|doc| doc.work_outline_snapshot("space", true));
         assert!(after.instructions.iter().any(|row| !row.archived() && row.text == "Rule"));
         assert!(host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).is_err());
+        let id = after.instructions.iter().find(|row| !row.archived()).unwrap().id.clone();
+        host.work_outline_mutate(&mast_proto::WorkOutlineMutation::UpdateWorkItemInstruction(
+            mast_proto::UpdateWorkItemInstructionParams { instruction_id:id.clone(), text:"Edited".into(), operation_id:"edit".into() }
+        ), &actor, &[]).unwrap();
+        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor).is_err());
+        host.work_outline_mutate(&mast_proto::WorkOutlineMutation::UpdateWorkItemInstruction(
+            mast_proto::UpdateWorkItemInstructionParams { instruction_id:id, text:"Rule".into(), operation_id:"revert".into() }
+        ), &actor, &[]).unwrap();
+        host.undo_workflow_pack_batch("space", &receipt, &actor).unwrap();
+        let undone = host.read(|doc| doc.work_outline_snapshot("space", true));
+        assert!(undone.instructions.iter().all(|row| row.archived()));
     }
 
     #[tokio::test]
