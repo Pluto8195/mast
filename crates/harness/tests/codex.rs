@@ -1323,7 +1323,7 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             id: "cs1".into(),
             is_error: false,
             output: None,
-            exit_code: None,
+            exit_code: Some(0),
             diff: None,
         }),
     }));
