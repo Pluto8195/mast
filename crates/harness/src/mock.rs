@@ -787,6 +787,8 @@ impl Harness for InstructionMockHarness {
                 cwd,
                 session_id: session_id.clone(),
                 assistant_message_id: format!("{session_id}-a0"),
+                chat_id: None,
+                space_id: None,
             }));
             let mut prompt = first_prompt;
             let mut turn = 0usize;

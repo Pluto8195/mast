@@ -60,6 +60,8 @@ fn mock_script() -> Vec<AgentEvent> {
             cwd: "/tmp".into(),
             session_id: "hs-1".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         },
         AgentEvent::TextDelta { text: "Hel".into() },
         AgentEvent::TextDelta { text: "lo".into() },
@@ -2042,6 +2044,8 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
         cwd: "/tmp".into(),
         session_id: "hs-hb".into(),
         assistant_message_id: "a-hb".into(),
+        chat_id: None,
+        space_id: None,
     }];
     // A long "silent" stretch: redacted thinking / input_json_delta windows
     // stream as empty reasoning deltas.
@@ -2171,6 +2175,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             cwd: "/tmp".into(),
             session_id: "hs-steer".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         },
         AgentEvent::TextDelta {
             text: "part one".into(),

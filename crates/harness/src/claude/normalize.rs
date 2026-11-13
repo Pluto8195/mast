@@ -337,6 +337,8 @@ impl Normalizer {
                     cwd: f.cwd,
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
+                    chat_id: None,
+                    space_id: None,
                 }]
             }
 

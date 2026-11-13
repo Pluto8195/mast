@@ -81,6 +81,8 @@ fn session_started() -> AgentEvent {
         cwd: "/tmp".into(),
         session_id: "hs-q".into(),
         assistant_message_id: "a-q".into(),
+        chat_id: None,
+        space_id: None,
     }
 }
 

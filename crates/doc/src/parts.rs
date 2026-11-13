@@ -904,6 +904,8 @@ mod tests {
                 cwd: "/".into(),
                 session_id: "s".into(),
                 assistant_message_id: "a".into(),
+                chat_id: None,
+                space_id: None,
             },
         );
         assert!(parts.is_empty());

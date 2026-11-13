@@ -160,6 +160,8 @@ impl Harness for InstantHarness {
                 cwd: "/tmp".into(),
                 session_id: "hs-relay".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }),
             Ok(AgentEvent::TextDelta {
                 text: "relayed reply".into(),

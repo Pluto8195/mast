@@ -417,6 +417,8 @@ impl Harness for HeldHarness {
             cwd: request.cwd.clone(),
             session_id: "sess-wake".into(),
             assistant_message_id: format!("a-{}", request.prompt.len()),
+            chat_id: None,
+            space_id: None,
         })]);
         let done = futures::stream::once(async move {
             let _ = finish.recv().await;

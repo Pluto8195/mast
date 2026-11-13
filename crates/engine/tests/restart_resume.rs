@@ -130,6 +130,8 @@ impl Harness for RestartInterruptedHarness {
                     cwd: request.cwd,
                     session_id: "hs-before-graceful-restart".into(),
                     assistant_message_id: "assistant-before-restart".into(),
+                    chat_id: None,
+                    space_id: None,
                 }))
                 .await;
             let _ = tx
@@ -208,6 +210,8 @@ impl Harness for RecordingHarness {
                     cwd: request.cwd.clone(),
                     session_id: self.session_id.clone(),
                     assistant_message_id: "a-1".into(),
+                    chat_id: None,
+                    space_id: None,
                 }),
                 Ok(AgentEvent::TextDelta {
                     text: format!("ack: {}", request.prompt),
@@ -545,6 +549,8 @@ async fn completed_journal_tail_repairs_user_only_transcript_once() {
             cwd: "/tmp".into(),
             session_id: "hs-lost-tail".into(),
             assistant_message_id: "provider-start".into(),
+            chat_id: None,
+            space_id: None,
         },
         AgentEvent::TextDelta {
             text: "the durable ".into(),
@@ -671,6 +677,8 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
                     cwd: "/tmp".into(),
                     session_id: "hs-crash".into(),
                     assistant_message_id: "msg-assistant-1".into(),
+                    chat_id: None,
+                    space_id: None,
                 },
             )
             .unwrap();
@@ -780,6 +788,8 @@ impl Harness for PersistentHarness {
                 cwd: "/tmp".into(),
                 session_id: "hs-persist".into(),
                 assistant_message_id: "a-1".into(),
+                chat_id: None,
+                space_id: None,
             }];
             for ev in first.into_iter().chain(turn(1, "first")) {
                 if tx.send(Ok(ev)).await.is_err() {
@@ -913,6 +923,8 @@ fn seed_fresh_crash(dir: &std::path::Path, attempts: u32) {
                     cwd: "/tmp".into(),
                     session_id: "hs-crash".into(),
                     assistant_message_id: "msg-assistant-1".into(),
+                    chat_id: None,
+                    space_id: None,
                 },
             )
             .unwrap();
@@ -1047,6 +1059,8 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
                     cwd: "/tmp".into(),
                     session_id: "hs-crash".into(),
                     assistant_message_id: "msg-assistant-1".into(),
+                    chat_id: None,
+                    space_id: None,
                 },
             )
             .unwrap();

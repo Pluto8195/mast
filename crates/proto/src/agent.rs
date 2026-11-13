@@ -450,6 +450,10 @@ pub enum AgentEvent {
         /// Harness-native session id (used for resume).
         session_id: String,
         assistant_message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<String>,
     },
     TextDelta {
         text: String,

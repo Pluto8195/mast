@@ -69,6 +69,8 @@ impl GatedHarness {
             cwd,
             session_id: "sess-agent".into(),
             assistant_message_id: "a-1".into(),
+            chat_id: None,
+            space_id: None,
         })]);
         let done = futures::stream::once(async move {
             release.notified().await;

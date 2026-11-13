@@ -1828,7 +1828,13 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
-        let seq = match self.journal.append(chat_id, event) {
+        let mut journal_event = event.clone();
+        if let AgentEvent::SessionStarted { chat_id: event_chat, space_id, .. } = &mut journal_event {
+            *event_chat = Some(chat_id.to_owned());
+            *space_id = self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten())
+                .and_then(|chat| chat.space_id);
+        }
+        let seq = match self.journal.append(chat_id, &journal_event) {
             Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
@@ -4002,6 +4008,8 @@ mod tests {
             cwd: cwd.into(),
             session_id: id.into(),
             assistant_message_id: "a".into(),
+            chat_id: None,
+            space_id: None,
         };
         let done = |id: Option<&str>| AgentEvent::Done {
             status: DoneStatus::Completed,
