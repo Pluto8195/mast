@@ -228,5 +228,124 @@ async fn agent_created_child_chats_are_idempotent_and_inherit_the_work_item() {
     let _: Value = current;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_pack_tools_need_admin_and_apply_and_undo_through_receipts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FakeClaude));
+    let core = EngineCore::assemble(
+        &root.join("data"),
+        Arc::new(registry),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .expect("engine core assembles");
+    let admin = mast_rpc::memory_client(core.rpc_service());
+    admin
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createSpace", "spaceId": SPACE, "deviceId": core.device_id,
+                    "path": project.to_string_lossy() }),
+        )
+        .await
+        .unwrap();
+    admin
+        .call(
+            methods::MUTATE,
+            json!({ "op": "createChat", "chatId": PARENT, "spaceId": SPACE,
+                    "deviceId": core.device_id,
+                    "config": { "harness": "claude-code", "model": null, "reasoning": null,
+                                "sandbox": "workspace-write" } }),
+        )
+        .await
+        .unwrap();
+    let pack_path = root.join("pack.json");
+    std::fs::write(
+        &pack_path,
+        json!({ "format": "mast.workflow-pack/v1", "mode": "full",
+                "scopes": [{ "itemPath": ["Tasks"], "instructions": ["Run the tests"] }],
+                "templates": [] })
+        .to_string(),
+    )
+    .unwrap();
+    let lease = core
+        .sessions
+        .agent_tokens()
+        .mint(PARENT, "run-1", SPACE, &core.device_id);
+    let tools = Tools::new(Arc::new(Mast::with_client(
+        mast_rpc::memory_client(core.rpc_service()),
+        Some(lease.token().to_owned()),
+    )));
+    for name in [
+        "work_outline_workflow_pack_export",
+        "work_outline_workflow_pack_preview_import",
+        "work_outline_workflow_pack_apply",
+        "work_outline_workflow_pack_undo",
+        "work_outline_workflow_pack_receipts",
+    ] {
+        assert!(tools.has(name), "{name}");
+    }
+    let preview_args = json!({ "path": pack_path.to_string_lossy() });
+    let err = tools
+        .call("work_outline_workflow_pack_preview_import", preview_args.clone())
+        .await
+        .unwrap_err();
+    assert!(err.contains("admin"), "{err}");
+
+    // The user grants admin; the engine re-checks the grant at authenticate.
+    core.sessions.agent_tokens().admin().grant(PARENT, SPACE, Some(600), false);
+    let lease = core
+        .sessions
+        .agent_tokens()
+        .mint(PARENT, "run-2", SPACE, &core.device_id);
+    let tools = Tools::new(Arc::new(Mast::with_client(
+        mast_rpc::memory_client(core.rpc_service()),
+        Some(lease.token().to_owned()),
+    )));
+    let exported = tools
+        .call("work_outline_workflow_pack_export", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(exported["pack"]["format"], "mast.workflow-pack/v1");
+    let preview = tools
+        .call("work_outline_workflow_pack_preview_import", preview_args)
+        .await
+        .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap().to_owned();
+    let err = tools
+        .call("work_outline_workflow_pack_apply", json!({ "previewId": "unknown" }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("preview"), "{err}");
+    let receipt = tools
+        .call("work_outline_workflow_pack_apply", json!({ "previewId": preview_id }))
+        .await
+        .unwrap();
+    assert_eq!(receipt["summary"]["instructionsAdded"], 1);
+    let snapshot = || {
+        mast_doc::materialize_work_outline(SPACE, &core.workspace.work_outline_inputs(SPACE))
+    };
+    assert!(snapshot().instructions.iter().any(|i| !i.archived() && i.text == "Run the tests"));
+    let listed = tools
+        .call("work_outline_workflow_pack_receipts", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["receipts"][0]["id"], receipt["id"]);
+    let undone = tools
+        .call("work_outline_workflow_pack_undo", json!({ "receiptId": receipt["id"] }))
+        .await
+        .unwrap();
+    assert!(undone["undoneAt"].is_number());
+    assert!(snapshot().instructions.iter().all(|i| i.archived()));
+    let err = tools
+        .call("work_outline_workflow_pack_undo", json!({ "receiptId": receipt["id"] }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("already"), "{err}");
+}
+
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;

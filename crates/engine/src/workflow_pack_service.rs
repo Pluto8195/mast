@@ -180,12 +180,14 @@ impl WorkflowPackService {
     }
 
     /// Apply a previewed pack with the caller's choice for every conflict.
+    /// `admin_space` is the Space an admin agent holds a grant for, else `None`.
     pub fn apply(
         &self,
         space_id: &str,
         preview_id: &str,
         resolutions: &WorkflowPackResolutions,
         actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
     ) -> Result<WorkflowPackReceiptView, String> {
         let _gate = lock(&self.gate);
         let dir = self.receipt_dir()?;
@@ -211,7 +213,7 @@ impl WorkflowPackService {
         }
         let operations = self
             .workspace
-            .apply_workflow_pack_batch(space_id, &pack, &scopes, &templates, &pairs, actor)?;
+            .apply_workflow_pack_batch(space_id, &pack, &scopes, &templates, &pairs, actor, admin_space)?;
         let receipt = WorkflowPackReceipt {
             id: receipt_id,
             space_id: space_id.to_owned(),
@@ -222,7 +224,7 @@ impl WorkflowPackService {
         };
         if let Err(error) = save_receipt(&dir, &receipt) {
             // Without a receipt the import could never be undone: take it back.
-            let undone = self.workspace.undo_workflow_pack_batch(space_id, &receipt.operations, actor);
+            let undone = self.workspace.undo_workflow_pack_batch(space_id, &receipt.operations, actor, admin_space);
             return Err(match undone {
                 Ok(()) => format!("The import was rolled back because its receipt could not be saved: {error}"),
                 Err(undo) => format!("The import was applied but its receipt could not be saved ({error}) and rolling back failed: {undo}"),
@@ -238,6 +240,7 @@ impl WorkflowPackService {
         space_id: &str,
         receipt_id: &str,
         actor: &WorkOutlineActor,
+        admin_space: Option<&str>,
     ) -> Result<WorkflowPackReceiptView, String> {
         let _gate = lock(&self.gate);
         let dir = self.receipt_dir()?;
@@ -249,7 +252,7 @@ impl WorkflowPackService {
             return Err("That import was already undone".into());
         }
         self.workspace
-            .undo_workflow_pack_batch(space_id, &receipt.operations, actor)?;
+            .undo_workflow_pack_batch(space_id, &receipt.operations, actor, admin_space)?;
         receipt.undone_at = Some(chrono::Utc::now().timestamp_millis());
         save_receipt(&dir, &receipt)
             .map_err(|error| format!("The import was undone but its receipt could not be updated: {error}"))?;
@@ -345,10 +348,10 @@ mod tests {
         let pack = write_pack(dir.path(), &["Rule"]);
         let service = WorkflowPackService::new(host.clone());
         let none = WorkflowPackResolutions::default();
-        assert!(service.apply("space", "nope", &none, &actor()).unwrap_err().contains("receipts"));
+        assert!(service.apply("space", "nope", &none, &actor(), None).unwrap_err().contains("receipts"));
         service.set_receipt_dir(receipts.clone());
         let preview = service.preview_import("space", &pack).unwrap();
-        let receipt = service.apply("space", &preview.preview_id, &none, &actor()).unwrap();
+        let receipt = service.apply("space", &preview.preview_id, &none, &actor(), None).unwrap();
         assert_eq!(receipt.summary.items_created, 1);
         assert_eq!(receipt.summary.instructions_added, 1);
         // A new service over the same directory, as after a restart.
@@ -363,19 +366,19 @@ mod tests {
         host.work_outline_mutate(&WorkOutlineMutation::UpdateWorkItemInstruction(UpdateWorkItemInstructionParams {
             instruction_id: id.clone(), text: "Edited".into(), operation_id: "edit".into(),
         }), &actor(), &[]).unwrap();
-        assert!(restarted.undo("space", &receipt.id, &actor()).is_err());
-        assert!(restarted.undo("other", &receipt.id, &actor()).is_err());
-        assert!(restarted.undo("space", "../escape", &actor()).is_err());
+        assert!(restarted.undo("space", &receipt.id, &actor(), None).is_err());
+        assert!(restarted.undo("other", &receipt.id, &actor(), None).is_err());
+        assert!(restarted.undo("space", "../escape", &actor(), None).is_err());
         host.work_outline_mutate(&WorkOutlineMutation::UpdateWorkItemInstruction(UpdateWorkItemInstructionParams {
             instruction_id: id, text: "Rule".into(), operation_id: "revert".into(),
         }), &actor(), &[]).unwrap();
-        let undone = restarted.undo("space", &receipt.id, &actor()).unwrap();
+        let undone = restarted.undo("space", &receipt.id, &actor(), None).unwrap();
         assert!(undone.undone_at.is_some());
         assert!(snapshot().items.iter().all(|item| item.archived_at.is_some()));
-        assert!(restarted.undo("space", &receipt.id, &actor()).unwrap_err().contains("already"));
+        assert!(restarted.undo("space", &receipt.id, &actor(), None).unwrap_err().contains("already"));
         // The same pack can be imported again after an undo.
         let again = restarted.preview_import("space", &pack).unwrap();
-        restarted.apply("space", &again.preview_id, &none, &actor()).unwrap();
+        restarted.apply("space", &again.preview_id, &none, &actor(), None).unwrap();
         assert_eq!(restarted.list_receipts("space").unwrap().len(), 2);
     }
 
@@ -387,18 +390,18 @@ mod tests {
         service.set_receipt_dir(dir.path().join("receipts"));
         let pack = write_pack(dir.path(), &["Theirs"]);
         let first = service.preview_import("space", &pack).unwrap();
-        service.apply("space", &first.preview_id, &WorkflowPackResolutions::default(), &actor()).unwrap();
+        service.apply("space", &first.preview_id, &WorkflowPackResolutions::default(), &actor(), None).unwrap();
         let again = service.preview_import("space", &pack).unwrap();
         assert!(again.scopes[0].current == again.scopes[0].incoming);
-        assert!(service.apply("space", &again.preview_id, &WorkflowPackResolutions::default(), &actor()).unwrap_err().contains("Nothing"));
+        assert!(service.apply("space", &again.preview_id, &WorkflowPackResolutions::default(), &actor(), None).unwrap_err().contains("Nothing"));
         let other = write_pack(dir.path(), &["Different"]);
         let conflict = service.preview_import("space", &other).unwrap();
-        let err = service.apply("space", &conflict.preview_id, &WorkflowPackResolutions::default(), &actor()).unwrap_err();
+        let err = service.apply("space", &conflict.preview_id, &WorkflowPackResolutions::default(), &actor(), None).unwrap_err();
         assert!(err.contains("Choose"));
         let choose = WorkflowPackResolutions {
             scopes: vec![ScopeResolution { item_path: vec!["Tasks".into()], resolution: ConflictResolution::Replace }],
             templates: vec![],
         };
-        service.apply("space", &conflict.preview_id, &choose, &actor()).unwrap();
+        service.apply("space", &conflict.preview_id, &choose, &actor(), None).unwrap();
     }
 }

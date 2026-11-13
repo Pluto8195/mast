@@ -3275,7 +3275,7 @@ impl RpcService for EngineRpc {
                 let p: crate::workflow_pack::ApplyParams = parse_params(params)?;
                 let service = self.work_outline.clone();
                 let receipt = tokio::task::spawn_blocking(move || {
-                    service.workflow_pack().apply(&p.space_id, &p.preview_id, &p.resolutions, &service.local_user())
+                    service.workflow_pack().apply(&p.space_id, &p.preview_id, &p.resolutions, &service.local_user(), None)
                 })
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?
@@ -3286,7 +3286,7 @@ impl RpcService for EngineRpc {
                 let p: crate::workflow_pack::UndoParams = parse_params(params)?;
                 let service = self.work_outline.clone();
                 let receipt = tokio::task::spawn_blocking(move || {
-                    service.workflow_pack().undo(&p.space_id, &p.receipt_id, &service.local_user())
+                    service.workflow_pack().undo(&p.space_id, &p.receipt_id, &service.local_user(), None)
                 })
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?

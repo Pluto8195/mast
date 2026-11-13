@@ -880,6 +880,14 @@ pub mod agent_tools {
         /// resolve), with a dry-run preview and a user-approved token for
         /// bulk changes. Refused unless the user granted this chat admin.
         pub const ADMIN: &str = "work_outline_admin";
+        /// Admin chats only: export the Space's instructions and templates as
+        /// a workflow pack, preview importing a pack file, apply a previewed
+        /// pack, undo an apply from its receipt, and list receipts.
+        pub const WORKFLOW_PACK_EXPORT: &str = "work_outline_workflow_pack_export";
+        pub const WORKFLOW_PACK_PREVIEW_IMPORT: &str = "work_outline_workflow_pack_preview_import";
+        pub const WORKFLOW_PACK_APPLY: &str = "work_outline_workflow_pack_apply";
+        pub const WORKFLOW_PACK_UNDO: &str = "work_outline_workflow_pack_undo";
+        pub const WORKFLOW_PACK_RECEIPTS: &str = "work_outline_workflow_pack_receipts";
         /// Engine-internal (not an MCP tool): queue the first Turn of a child
         /// Chat the MCP `create_chat` tool created, with ids derived from the
         /// calling Chat and its idempotency key so retries never duplicate it.
@@ -946,7 +954,7 @@ pub mod agent_tools {
         ];
 
         /// The Work Outline tools, in catalog order.
-        pub const WORK_OUTLINE: [&str; 13] = [
+        pub const WORK_OUTLINE: [&str; 18] = [
             READ_CURRENT,
             READ_SUBTREE,
             CREATE_CHILD,
@@ -960,6 +968,11 @@ pub mod agent_tools {
             PROPOSE_INSTRUCTION,
             PROPOSE_APPROVAL_RULE,
             ADMIN,
+            WORKFLOW_PACK_EXPORT,
+            WORKFLOW_PACK_PREVIEW_IMPORT,
+            WORKFLOW_PACK_APPLY,
+            WORKFLOW_PACK_UNDO,
+            WORKFLOW_PACK_RECEIPTS,
         ];
     }
 
@@ -1224,6 +1237,39 @@ pub mod agent_tools {
                 p("maxDepth", "with read"),
             ],
             example: r#"{"steps": [{"op": "rename", "itemId": "<item id>", "title": "New title"}], "idempotencyKey": "admin-rename-1"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORKFLOW_PACK_EXPORT,
+            required: &[],
+            optional: &[p("mode", "share (default; also redacts emails and home paths) or full")],
+            example: r#"{"mode": "share"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORKFLOW_PACK_PREVIEW_IMPORT,
+            required: &[p("path", "absolute path of a workflow pack file on this device")],
+            optional: &[],
+            example: r#"{"path": "/path/to/pack.json"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORKFLOW_PACK_APPLY,
+            required: &[p("previewId", "from work_outline_workflow_pack_preview_import")],
+            optional: &[p(
+                "resolutions",
+                "{scopes:[{itemPath,resolution}], templates:[{name,resolution}]} with resolution skip, append (instructions) or replace; required for every conflict",
+            )],
+            example: r#"{"previewId": "<preview id>", "resolutions": {"scopes": [{"itemPath": [], "resolution": "append"}], "templates": []}}"#,
+        },
+        ToolUsage {
+            tool: tools::WORKFLOW_PACK_UNDO,
+            required: &[p("receiptId", "from apply or work_outline_workflow_pack_receipts")],
+            optional: &[],
+            example: r#"{"receiptId": "<receipt id>"}"#,
+        },
+        ToolUsage {
+            tool: tools::WORKFLOW_PACK_RECEIPTS,
+            required: &[],
+            optional: &[],
+            example: r#"{}"#,
         },
         ToolUsage {
             tool: tools::PROPOSE_INSTRUCTION,

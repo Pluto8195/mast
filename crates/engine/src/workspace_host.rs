@@ -955,6 +955,7 @@ impl WorkspaceHost {
         templates: &[mast_proto::workflow_pack::WorkflowPackTemplatePreview],
         operations: &[crate::workflow_pack::WorkflowPackMutationPair],
         actor: &mast_proto::WorkOutlineActor,
+        admin_space: Option<&str>,
     ) -> Result<Vec<crate::workflow_pack::WorkflowPackMutationPair>, String> {
         if crate::work_outline::writes_disabled() {
             return Err("Work Outline changes are turned off on this device".into());
@@ -967,20 +968,20 @@ impl WorkspaceHost {
             let bytes = doc.to_bytes().map_err(|error| error.to_string())?;
             let mut staged = RegistryDoc::from_bytes(&bytes, doc.device_id()).map_err(|error| error.to_string())?;
             for pair in operations {
-                staged.apply_work_outline_mutation(&pair.forward, actor, now).map_err(|error| error.to_wire_message())?;
+                staged.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&pair.forward, actor, now)).map_err(|error| error.to_wire_message())?;
             }
             // Do not apply a pack whose inverses cannot be guarded and run.
             for pair in operations.iter().rev() {
                 let snapshot = staged.work_outline_snapshot(space_id, synced);
                 crate::workflow_pack::guard_pair_undo(&snapshot, pair)?;
-                staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+                staged.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&pair.inverse, actor, now)).map_err(|error| error.to_wire_message())?;
             }
             let mut applied: Vec<crate::workflow_pack::WorkflowPackMutationPair> = Vec::new();
             for pair in operations {
-                if let Err(error) = doc.apply_work_outline_mutation(&pair.forward, actor, now) {
+                if let Err(error) = doc.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&pair.forward, actor, now)) {
                     let mut failures = Vec::new();
                     for completed in applied.iter().rev() {
-                        if let Err(undo_error) = doc.apply_work_outline_mutation(&completed.inverse, actor, now) {
+                        if let Err(undo_error) = doc.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&completed.inverse, actor, now)) {
                             failures.push(undo_error.to_wire_message());
                         }
                     }
@@ -998,6 +999,7 @@ impl WorkspaceHost {
         space_id: &str,
         receipt: &[crate::workflow_pack::WorkflowPackMutationPair],
         actor: &mast_proto::WorkOutlineActor,
+        admin_space: Option<&str>,
     ) -> Result<(), String> {
         if crate::work_outline::writes_disabled() {
             return Err("Work Outline changes are turned off on this device".into());
@@ -1010,10 +1012,10 @@ impl WorkspaceHost {
             for pair in receipt.iter().rev() {
                 let snapshot = staged.work_outline_snapshot(space_id, synced);
                 crate::workflow_pack::guard_pair_undo(&snapshot, pair)?;
-                staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+                staged.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&pair.inverse, actor, now)).map_err(|error| error.to_wire_message())?;
             }
             for pair in receipt.iter().rev() {
-                doc.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+                doc.with_admin_scope(admin_space, |scoped| scoped.apply_work_outline_mutation(&pair.inverse, actor, now)).map_err(|error| error.to_wire_message())?;
             }
             Ok(())
         })
@@ -2852,20 +2854,20 @@ mod tests {
             .map(|addition| WorkflowPackMutationPair::new(addition.create, addition.undo)).collect();
         let actor = mast_proto::WorkOutlineActor { kind:mast_proto::WorkOutlineActorKind::User,
             device_id:"device".into(), chat_id:None, message_id:None };
-        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).unwrap();
+        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor, None).unwrap();
         assert_eq!(receipt.len(), 1);
         let after = host.read(|doc| doc.work_outline_snapshot("space", true));
         assert!(after.instructions.iter().any(|row| !row.archived() && row.text == "Rule"));
-        assert!(host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).is_err());
+        assert!(host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor, None).is_err());
         let id = after.instructions.iter().find(|row| !row.archived()).unwrap().id.clone();
         host.work_outline_mutate(&mast_proto::WorkOutlineMutation::UpdateWorkItemInstruction(
             mast_proto::UpdateWorkItemInstructionParams { instruction_id:id.clone(), text:"Edited".into(), operation_id:"edit".into() }
         ), &actor, &[]).unwrap();
-        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor).is_err());
+        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor, None).is_err());
         host.work_outline_mutate(&mast_proto::WorkOutlineMutation::UpdateWorkItemInstruction(
             mast_proto::UpdateWorkItemInstructionParams { instruction_id:id, text:"Rule".into(), operation_id:"revert".into() }
         ), &actor, &[]).unwrap();
-        host.undo_workflow_pack_batch("space", &receipt, &actor).unwrap();
+        host.undo_workflow_pack_batch("space", &receipt, &actor, None).unwrap();
         let undone = host.read(|doc| doc.work_outline_snapshot("space", true));
         assert!(undone.instructions.iter().all(|row| row.archived()));
     }
@@ -2913,7 +2915,7 @@ mod tests {
         };
         let pairs = plan_pack_operations(&snap(), &scopes, &templates, &choices, "run").unwrap();
         assert_eq!(pairs.len(), 4);
-        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).unwrap();
+        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor, None).unwrap();
         let after = snap();
         let live: Vec<_> = after.instructions.iter().filter(|row| !row.archived()).map(|row| row.text.as_str()).collect();
         assert_eq!(live, ["Theirs"]);
@@ -2921,10 +2923,10 @@ mod tests {
         assert!(after.templates.iter().any(|t| t.name == "Extra"));
         // A later edit makes undo refuse, and nothing is half-undone.
         host.work_outline_mutate(&import("Flow", node("Edited"), Some(flow_id.clone()), "edit"), &actor, &[]).unwrap();
-        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor).is_err());
+        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor, None).is_err());
         assert_eq!(snap().templates.len(), 2);
         host.work_outline_mutate(&import("Flow", node("New"), Some(flow_id.clone()), "revert"), &actor, &[]).unwrap();
-        host.undo_workflow_pack_batch("space", &receipt, &actor).unwrap();
+        host.undo_workflow_pack_batch("space", &receipt, &actor, None).unwrap();
         let undone = snap();
         let live: Vec<_> = undone.instructions.iter().filter(|row| !row.archived()).map(|row| row.text.as_str()).collect();
         assert_eq!(live, ["Mine"]);
