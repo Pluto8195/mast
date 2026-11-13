@@ -427,6 +427,7 @@ impl Harness for HeldHarness {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
+        let limited = request.prompt == "hit-limit";
         let mut finish = self.finish.subscribe();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::Mock,
@@ -438,16 +439,19 @@ impl Harness for HeldHarness {
             chat_id: None,
             space_id: None,
         })]);
+        let error = futures::stream::iter(limited.then(|| Ok(AgentEvent::Error {
+            message: "limit".into(), code: Some("usage_weekly".into()), resets_at: Some(1_000_500),
+        })));
         let done = futures::stream::once(async move {
             let _ = finish.recv().await;
             Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
+                status: if limited { DoneStatus::Errored } else { DoneStatus::Completed },
                 result: None,
                 error: None,
                 session_id: Some("sess-wake".into()),
             })
         });
-        Ok(started.chain(done).boxed())
+        Ok(started.chain(error).chain(done).boxed())
     }
 }
 
@@ -648,15 +652,10 @@ async fn usage_limit_defers_worker_continuation_until_reset() {
     let rig = Rig::new().await;
     auto_continue_worker(&rig, "limited-worker", "active");
     rig.wakes.set_settings(ORCH, WakeSettings { auto_continue: true, ..Default::default() }).await;
-    rig.core.doc_host.queue_message("limited-worker", "begin", Vec::new()).unwrap();
+    rig.core.doc_host.queue_message("limited-worker", "hit-limit", Vec::new()).unwrap();
     rig.wait_for(|| rig.core.sessions.turn_in_flight("limited-worker"), "worker start").await;
     let started = rig.core.sessions.session_status("limited-worker").unwrap();
     rig.wakes.ingest_sessions(&[started]).await;
-    let journals = rig.store.parent().unwrap().join("data/orgs/dev-org/dev-user/journals");
-    let journal = mast_engine::RunJournal::open(journals).unwrap();
-    journal.append("limited-worker", &AgentEvent::Error {
-        message: "limit".into(), code: Some("usage_weekly".into()), resets_at: Some(1_000_500),
-    }).unwrap();
     let _ = rig.finish.send(());
     rig.wait_for(|| !rig.core.sessions.turn_in_flight("limited-worker"), "worker finish").await;
     let done = rig.core.sessions.session_status("limited-worker").unwrap();
