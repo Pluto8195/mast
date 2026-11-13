@@ -89,6 +89,28 @@ pub struct ImportPreviewParams {
     pub path: std::path::PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyParams {
+    pub space_id: String,
+    pub preview_id: String,
+    #[serde(default)]
+    pub resolutions: WorkflowPackResolutions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UndoParams {
+    pub space_id: String,
+    pub receipt_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptsParams {
+    pub space_id: String,
+}
+
 /// Prepare the exact candidate and detected replacements for review.
 pub fn preview_export(
     snapshot: &WorkOutlineSnapshot,

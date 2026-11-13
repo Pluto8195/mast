@@ -154,6 +154,11 @@ pub mod methods {
     /// Read-only workflow-pack export and import previews.
     pub const WORKFLOW_PACK_EXPORT_PREVIEW: &str = "WorkflowPackExportPreview";
     pub const WORKFLOW_PACK_IMPORT_PREVIEW: &str = "WorkflowPackImportPreview";
+    /// Apply a previewed import with a resolution per conflict, undo an
+    /// apply from its stored receipt, and list a Space's receipts.
+    pub const WORKFLOW_PACK_APPLY: &str = "WorkflowPackApply";
+    pub const WORKFLOW_PACK_UNDO: &str = "WorkflowPackUndo";
+    pub const WORKFLOW_PACK_RECEIPTS: &str = "WorkflowPackReceipts";
     /// Every Work Outline mutation, one tagged call:
     /// `mast_proto::WorkOutlineMutation` (`{op: createWorkItem|updateWorkItem|
     /// moveWorkItem|archiveWorkItem|restoreWorkItem|assignChatToWorkItem|
@@ -709,6 +714,9 @@ mod tests {
         assert_eq!(methods::WATCH_WORK_OUTLINE, "WatchWorkOutline");
         assert_eq!(methods::WORK_OUTLINE_MUTATE, "WorkOutlineMutate");
         assert_eq!(methods::WORK_OUTLINE_QUERY, "WorkOutlineQuery");
+        assert_eq!(methods::WORKFLOW_PACK_APPLY, "WorkflowPackApply");
+        assert_eq!(methods::WORKFLOW_PACK_UNDO, "WorkflowPackUndo");
+        assert_eq!(methods::WORKFLOW_PACK_RECEIPTS, "WorkflowPackReceipts");
         assert_eq!(
             methods::VALIDATE_EXECUTION_CONFIGURATION,
             "ValidateExecutionConfiguration"
