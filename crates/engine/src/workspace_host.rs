@@ -946,6 +946,7 @@ impl WorkspaceHost {
     /// Apply a prepared pack under one registry lock after validating it on a
     /// private copy. If a live write unexpectedly fails, compensate in reverse
     /// order while still holding the lock and report any compensation failures.
+    /// Callers authorize the actor: the user, or an agent holding an admin grant.
     pub(crate) fn apply_workflow_pack_batch(
         &self,
         space_id: &str,
@@ -957,9 +958,6 @@ impl WorkspaceHost {
     ) -> Result<Vec<crate::workflow_pack::WorkflowPackMutationPair>, String> {
         if crate::work_outline::writes_disabled() {
             return Err("Work Outline changes are turned off on this device".into());
-        }
-        if actor.kind != mast_proto::WorkOutlineActorKind::User {
-            return Err("Only the user can apply a workflow pack".into());
         }
         let synced = self.registry_synced();
         let now = Utc::now().timestamp_millis();
@@ -974,19 +972,7 @@ impl WorkspaceHost {
             // Do not apply a pack whose inverses cannot be guarded and run.
             for pair in operations.iter().rev() {
                 let snapshot = staged.work_outline_snapshot(space_id, synced);
-                match &pair.forward {
-                    mast_proto::WorkOutlineMutation::CreateWorkItem(created) => {
-                        if crate::workflow_pack::guard_created_item_undo(&snapshot, created)? != pair.inverse {
-                            return Err("Item inverse does not match receipt".into());
-                        }
-                    }
-                    mast_proto::WorkOutlineMutation::CreateWorkItemInstruction(created) => {
-                        crate::workflow_pack::guard_instruction_undo(&snapshot, &crate::workflow_pack::PlannedInstructionAddition {
-                            create: pair.forward.clone(), undo: pair.inverse.clone(), expected_text: created.text.clone(),
-                        })?;
-                    }
-                    _ => return Err("This workflow pack operation cannot yet be undone".into()),
-                }
+                crate::workflow_pack::guard_pair_undo(&snapshot, pair)?;
                 staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
             }
             let mut applied: Vec<crate::workflow_pack::WorkflowPackMutationPair> = Vec::new();
@@ -1013,8 +999,8 @@ impl WorkspaceHost {
         receipt: &[crate::workflow_pack::WorkflowPackMutationPair],
         actor: &mast_proto::WorkOutlineActor,
     ) -> Result<(), String> {
-        if crate::work_outline::writes_disabled() || actor.kind != mast_proto::WorkOutlineActorKind::User {
-            return Err("Workflow pack undo is not authorized".into());
+        if crate::work_outline::writes_disabled() {
+            return Err("Work Outline changes are turned off on this device".into());
         }
         let synced = self.registry_synced();
         let now = Utc::now().timestamp_millis();
@@ -1023,19 +1009,7 @@ impl WorkspaceHost {
             let mut staged = RegistryDoc::from_bytes(&bytes, doc.device_id()).map_err(|error| error.to_string())?;
             for pair in receipt.iter().rev() {
                 let snapshot = staged.work_outline_snapshot(space_id, synced);
-                match &pair.forward {
-                    mast_proto::WorkOutlineMutation::CreateWorkItem(created) => {
-                        let expected = crate::workflow_pack::guard_created_item_undo(&snapshot, created)?;
-                        if expected != pair.inverse { return Err("Item inverse does not match receipt".into()); }
-                    }
-                    mast_proto::WorkOutlineMutation::CreateWorkItemInstruction(created) => {
-                        let addition = crate::workflow_pack::PlannedInstructionAddition {
-                            create: pair.forward.clone(), undo: pair.inverse.clone(), expected_text: created.text.clone(),
-                        };
-                        crate::workflow_pack::guard_instruction_undo(&snapshot, &addition)?;
-                    }
-                    _ => return Err("This workflow pack operation cannot yet be undone".into()),
-                }
+                crate::workflow_pack::guard_pair_undo(&snapshot, pair)?;
                 staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
             }
             for pair in receipt.iter().rev() {
@@ -2875,7 +2849,7 @@ mod tests {
         let scopes = preview_instruction_import(&pack, &snapshot).unwrap();
         let templates = preview_template_import(&pack, &snapshot).unwrap();
         let pairs: Vec<_> = plan_instruction_additions(&snapshot, &scopes, "import").unwrap().into_iter()
-            .map(|addition| WorkflowPackMutationPair { forward:addition.create, inverse:addition.undo }).collect();
+            .map(|addition| WorkflowPackMutationPair::new(addition.create, addition.undo)).collect();
         let actor = mast_proto::WorkOutlineActor { kind:mast_proto::WorkOutlineActorKind::User,
             device_id:"device".into(), chat_id:None, message_id:None };
         let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).unwrap();
@@ -2894,6 +2868,68 @@ mod tests {
         host.undo_workflow_pack_batch("space", &receipt, &actor).unwrap();
         let undone = host.read(|doc| doc.work_outline_snapshot("space", true));
         assert!(undone.instructions.iter().all(|row| row.archived()));
+    }
+
+    #[tokio::test]
+    async fn workflow_pack_replaces_conflicts_and_templates_and_undoes_them() {
+        use super::*;
+        use crate::workflow_pack::*;
+        use mast_proto::WorkOutlineMutation as M;
+        use mast_proto::work_outline_templates::{ImportWorkItemTemplateParams, TemplateNode};
+        use mast_proto::workflow_pack::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(store, WorkspaceHostConfig {
+            device_id: "device".into(), device_name: "Test".into(), platform: "macos".into(),
+            org_id: "org".into(), user_id: "user".into(), edge: None,
+        }).unwrap();
+        host.create_space("space", "device", "/tmp/example", None, false).unwrap();
+        let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::User,
+            device_id: "device".into(), chat_id: None, message_id: None };
+        let node = |title: &str| TemplateNode { title: title.into(), ..Default::default() };
+        let import = |name: &str, body: TemplateNode, id: Option<String>, op: &str| M::ImportWorkItemTemplate(ImportWorkItemTemplateParams {
+            space_id: "space".into(), name: name.into(), body, template_id: id, operation_id: op.into(),
+        });
+        host.work_outline_mutate(&M::CreateWorkItemInstruction(mast_proto::CreateWorkItemInstructionParams {
+            space_id: "space".into(), scope: mast_proto::InstructionScope::SpaceRoot, text: "Mine".into(),
+            placement: None, source: None, operation_id: "mine".into(),
+        }), &actor, &[]).unwrap();
+        host.work_outline_mutate(&import("Flow", node("Old"), None, "flow"), &actor, &[]).unwrap();
+        let snap = || host.read(|doc| doc.work_outline_snapshot("space", true));
+        let flow_id = snap().templates[0].id.clone();
+        let pack = WorkflowPack { format: WORKFLOW_PACK_FORMAT.into(), mode: WorkflowPackMode::Full,
+            scopes: vec![WorkflowPackScope { item_path: vec![], instructions: vec!["Theirs".into()] }],
+            templates: vec![
+                WorkflowPackTemplate { name: "Flow".into(), body: node("New") },
+                WorkflowPackTemplate { name: "Extra".into(), body: node("X") },
+            ] };
+        let scopes = preview_instruction_import(&pack, &snap()).unwrap();
+        let templates = preview_template_import(&pack, &snap()).unwrap();
+        let none = WorkflowPackResolutions::default();
+        assert!(plan_pack_operations(&snap(), &scopes, &templates, &none, "run").unwrap_err().contains("Choose"));
+        let choices = WorkflowPackResolutions {
+            scopes: vec![ScopeResolution { item_path: vec![], resolution: ConflictResolution::Replace }],
+            templates: vec![TemplateResolution { name: "flow".into(), resolution: ConflictResolution::Replace }],
+        };
+        let pairs = plan_pack_operations(&snap(), &scopes, &templates, &choices, "run").unwrap();
+        assert_eq!(pairs.len(), 4);
+        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).unwrap();
+        let after = snap();
+        let live: Vec<_> = after.instructions.iter().filter(|row| !row.archived()).map(|row| row.text.as_str()).collect();
+        assert_eq!(live, ["Theirs"]);
+        assert_eq!(after.templates.iter().find(|t| t.id == flow_id).unwrap().body, node("New"));
+        assert!(after.templates.iter().any(|t| t.name == "Extra"));
+        // A later edit makes undo refuse, and nothing is half-undone.
+        host.work_outline_mutate(&import("Flow", node("Edited"), Some(flow_id.clone()), "edit"), &actor, &[]).unwrap();
+        assert!(host.undo_workflow_pack_batch("space", &receipt, &actor).is_err());
+        assert_eq!(snap().templates.len(), 2);
+        host.work_outline_mutate(&import("Flow", node("New"), Some(flow_id.clone()), "revert"), &actor, &[]).unwrap();
+        host.undo_workflow_pack_batch("space", &receipt, &actor).unwrap();
+        let undone = snap();
+        let live: Vec<_> = undone.instructions.iter().filter(|row| !row.archived()).map(|row| row.text.as_str()).collect();
+        assert_eq!(live, ["Mine"]);
+        assert_eq!(undone.templates.len(), 1);
+        assert_eq!(undone.templates[0].body, node("Old"));
     }
 
     #[tokio::test]
