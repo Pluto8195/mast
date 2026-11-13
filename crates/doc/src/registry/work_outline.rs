@@ -937,6 +937,10 @@ impl RegistryDoc {
                     ..Default::default()
                 })
             }
+            WorkOutlineMutation::ImportWorkItemTemplate(p) => {
+                let id = self.import_work_item_template(p, now_ms)?;
+                Ok(WorkOutlineMutateReply { template_id: Some(id), ..Default::default() })
+            }
             WorkOutlineMutation::DeleteWorkItemTemplate(p) => {
                 self.delete_work_item_template(p).map(|_| empty)
             }

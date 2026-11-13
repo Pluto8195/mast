@@ -130,6 +130,10 @@ fn replay_reply(mutation: &WorkOutlineMutation) -> WorkOutlineMutateReply {
             work_item_id: Some(derive_id(&p.operation_id, roles::ITEM)),
             ..Default::default()
         },
+        WorkOutlineMutation::ImportWorkItemTemplate(p) => WorkOutlineMutateReply {
+            template_id: Some(p.template_id.clone().unwrap_or_else(|| derive_id(&p.operation_id, roles::TEMPLATE))),
+            ..Default::default()
+        },
         WorkOutlineMutation::CreateWorkItemExternalReference(p) => WorkOutlineMutateReply {
             reference_id: Some(external_reference_id(
                 &p.work_item_id,

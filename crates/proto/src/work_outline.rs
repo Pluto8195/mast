@@ -1547,6 +1547,7 @@ pub enum WorkOutlineMutation {
     SetLinearAssignedDestination(SetLinearAssignedDestinationParams),
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
+    ImportWorkItemTemplate(crate::work_outline_templates::ImportWorkItemTemplateParams),
     DeleteWorkItemTemplate(crate::work_outline_templates::DeleteWorkItemTemplateParams),
     // ── Container templates ──
     SetContainerTemplate(crate::work_outline_container_templates::SetContainerTemplateParams),
@@ -1591,6 +1592,7 @@ impl WorkOutlineMutation {
             Self::SetApprovalRule(p) => &p.operation_id,
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
+            Self::ImportWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
             Self::SetContainerTemplate(p) => &p.operation_id,
             Self::ApplyContainerTemplate(p) => &p.operation_id,
@@ -1634,6 +1636,7 @@ impl WorkOutlineMutation {
             Self::SetApprovalRule(_) => "setApprovalRule",
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
+            Self::ImportWorkItemTemplate(_) => "importWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",
             Self::SetContainerTemplate(_) => "setContainerTemplate",
             Self::ApplyContainerTemplate(_) => "applyContainerTemplate",

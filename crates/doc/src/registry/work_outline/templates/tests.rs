@@ -51,6 +51,23 @@ fn apply(doc: &mut RegistryDoc, mutation: WorkOutlineMutation) -> Outcome<WorkOu
     apply_as(doc, WorkOutlineActorKind::User, mutation)
 }
 
+#[test]
+fn imports_frozen_template_without_source_item() {
+    let mut doc = doc();
+    let mutation = WorkOutlineMutation::ImportWorkItemTemplate(ImportWorkItemTemplateParams {
+        space_id: SPACE.into(), name: "Example".into(),
+        body: TemplateNode { title: "Root".into(), instructions: vec!["Rule".into()], ..Default::default() },
+        template_id: None, operation_id: "import-template".into(),
+    });
+    assert!(apply_as(&mut doc, WorkOutlineActorKind::Agent, mutation.clone()).is_err());
+    let id = apply(&mut doc, mutation.clone()).unwrap().template_id.unwrap();
+    assert_eq!(apply(&mut doc, mutation).unwrap().template_id.as_deref(), Some(id.as_str()));
+    let templates = doc.templates_of_space(SPACE);
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].body.instructions, vec!["Rule"]);
+    assert_eq!(templates[0].revision, 1);
+}
+
 fn item(
     doc: &mut RegistryDoc,
     space_id: &str,

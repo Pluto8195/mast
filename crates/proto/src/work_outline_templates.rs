@@ -97,6 +97,18 @@ pub struct SaveWorkItemTemplateParams {
     pub operation_id: String,
 }
 
+/// Import a validated frozen template body into a Space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWorkItemTemplateParams {
+    pub space_id: String,
+    pub name: String,
+    pub body: TemplateNode,
+    #[serde(default)]
+    pub template_id: Option<String>,
+    pub operation_id: String,
+}
+
 /// `deleteWorkItemTemplate`: tombstone the template row. Projects keep their
 /// link, which then reads as dangling. Reply `{}`. User action only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
