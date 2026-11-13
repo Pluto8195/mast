@@ -835,6 +835,9 @@ impl RegistryDoc {
             WorkOutlineMutation::ArchiveWorkItemInstruction(p) => self
                 .archive_work_item_instruction(p, actor, now_ms)
                 .map(|_| empty),
+            WorkOutlineMutation::RestoreWorkItemInstruction(p) => self
+                .restore_work_item_instruction(p, now_ms)
+                .map(|_| empty),
             WorkOutlineMutation::CreateInstructionRevision(p) => {
                 let id = self.create_instruction_revision(p, actor, now_ms)?;
                 Ok(WorkOutlineMutateReply {

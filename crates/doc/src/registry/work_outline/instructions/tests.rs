@@ -105,6 +105,23 @@ fn instruct(doc: &mut RegistryDoc, op: &str, work_item: Option<&str>, text: &str
     try_instruct(doc, op, work_item, text).unwrap()
 }
 
+#[test]
+fn restore_instruction_preserves_identity_and_text() {
+    let mut doc = doc_with_spaces("device");
+    let id = instruct(&mut doc, "add-rule", None, "Keep this rule");
+    apply(&mut doc, WorkOutlineMutation::ArchiveWorkItemInstruction(ArchiveWorkItemInstructionParams {
+        instruction_id: id.clone(), operation_id: "archive-rule".into(),
+    })).unwrap();
+    assert!(doc.instructions_of_space(SPACE).iter().find(|row| row.id == id).unwrap().archived());
+    apply(&mut doc, WorkOutlineMutation::RestoreWorkItemInstruction(RestoreWorkItemInstructionParams {
+        instruction_id: id.clone(), operation_id: "restore-rule".into(),
+    })).unwrap();
+    let rows = doc.instructions_of_space(SPACE);
+    let row = rows.iter().find(|row| row.id == id).unwrap();
+    assert!(!row.archived());
+    assert_eq!(row.text, "Keep this rule");
+}
+
 fn edit(doc: &mut RegistryDoc, op: &str, id: &str, text: &str) -> Outcome<WorkOutlineMutateReply> {
     apply(
         doc,

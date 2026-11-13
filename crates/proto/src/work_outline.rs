@@ -1370,6 +1370,14 @@ pub struct ArchiveWorkItemInstructionParams {
     pub operation_id: String,
 }
 
+/// Restore an archived instruction without changing its identity or order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreWorkItemInstructionParams {
+    pub instruction_id: String,
+    pub operation_id: String,
+}
+
 /// `createInstructionRevision`: snapshot the item's current effective
 /// instructions. Reply: `revisionId` = `derive_id(operationId, "revision")`.
 /// Over budget fails with `limitExceeded` before any write.
@@ -1514,6 +1522,7 @@ pub enum WorkOutlineMutation {
     UpdateWorkItemInstruction(UpdateWorkItemInstructionParams),
     MoveWorkItemInstruction(MoveWorkItemInstructionParams),
     ArchiveWorkItemInstruction(ArchiveWorkItemInstructionParams),
+    RestoreWorkItemInstruction(RestoreWorkItemInstructionParams),
     CreateInstructionRevision(CreateInstructionRevisionParams),
     ApplyInstructionRevision(ApplyInstructionRevisionParams),
     KeepInstructionSession(KeepInstructionSessionParams),
@@ -1562,6 +1571,7 @@ impl WorkOutlineMutation {
             Self::UpdateWorkItemInstruction(p) => &p.operation_id,
             Self::MoveWorkItemInstruction(p) => &p.operation_id,
             Self::ArchiveWorkItemInstruction(p) => &p.operation_id,
+            Self::RestoreWorkItemInstruction(p) => &p.operation_id,
             Self::CreateInstructionRevision(p) => &p.operation_id,
             Self::ApplyInstructionRevision(p) => &p.operation_id,
             Self::KeepInstructionSession(p) => &p.operation_id,
@@ -1604,6 +1614,7 @@ impl WorkOutlineMutation {
             Self::UpdateWorkItemInstruction(_) => "updateWorkItemInstruction",
             Self::MoveWorkItemInstruction(_) => "moveWorkItemInstruction",
             Self::ArchiveWorkItemInstruction(_) => "archiveWorkItemInstruction",
+            Self::RestoreWorkItemInstruction(_) => "restoreWorkItemInstruction",
             Self::CreateInstructionRevision(_) => "createInstructionRevision",
             Self::ApplyInstructionRevision(_) => "applyInstructionRevision",
             Self::KeepInstructionSession(_) => "keepInstructionSession",
@@ -1647,6 +1658,7 @@ impl WorkOutlineMutation {
                 | Self::UpdateWorkItemInstruction(_)
                 | Self::MoveWorkItemInstruction(_)
                 | Self::ArchiveWorkItemInstruction(_)
+                | Self::RestoreWorkItemInstruction(_)
                 | Self::CreateInstructionRevision(_)
                 | Self::ApplyInstructionRevision(_)
                 | Self::KeepInstructionSession(_)
