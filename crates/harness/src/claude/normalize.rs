@@ -670,7 +670,7 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
-                let done = if f.subtype == "success" {
+                let mut done = if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {
                             DoneStatus::Interrupted
@@ -749,6 +749,11 @@ impl Normalizer {
                     if let Some(error) = result_error.or_else(|| self.pending_limit_error.take()) {
                         out.push(error);
                     }
+                }
+                if let AgentEvent::Done { error, .. } = &mut done
+                    && error.as_deref().and_then(usage_limit_code).is_some() {
+                    // The structured Error above already carries this message.
+                    *error = None;
                 }
                 self.pending_limit_error = None;
                 self.emitted_limit_error = false;
@@ -846,7 +851,7 @@ mod tests {
         let errors: Vec<_> = events.iter().filter(|event| matches!(event, AgentEvent::Error { .. })).collect();
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], AgentEvent::Error { code: Some(code), resets_at: Some(1_786_985_400_000), .. } if code == "usage_5h"));
-        assert!(events.iter().any(|event| matches!(event, AgentEvent::Done { status: DoneStatus::Errored, .. })));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Done { status: DoneStatus::Errored, error: None, .. })));
     }
 
     #[test]
