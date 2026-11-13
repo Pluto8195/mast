@@ -63,6 +63,26 @@ fn assistant_error_text(code: &str) -> String {
     }
 }
 
+/// Identify explicit usage-limit messages without classifying ordinary replies.
+fn usage_limit_code(text: &str) -> Option<&'static str> {
+    let text = text.to_ascii_lowercase();
+    if !(text.contains("hit your limit") || text.contains("usage limit") || text.contains("rate_limit")) {
+        return None;
+    }
+    if text.contains("weekly") || text.contains("seven_day") || text.contains("7-day") {
+        Some("usage_weekly")
+    } else if text.contains("5-hour") || text.contains("5 hour") || text.contains("five_hour") || text.contains("five-hour") {
+        Some("usage_5h")
+    } else {
+        Some("other")
+    }
+}
+
+fn reset_millis(value: i64) -> Option<i64> {
+    if value < 0 { None } else if value > 1_000_000_000_000 { Some(value) }
+    else { value.checked_mul(1000) }
+}
+
 /// Which claude.ai usage window a `rate_limit_event` refers to.
 fn rate_window_label(kind: &str) -> &'static str {
     match kind {
@@ -423,7 +443,7 @@ impl Normalizer {
                         out.push(tag(
                             parent,
                             AgentEvent::Error {
-                                code: None, resets_at: None, message: assistant_error_text(code),
+                                code: usage_limit_code(code).map(str::to_owned), resets_at: None, message: assistant_error_text(code),
                             },
                         ));
                     }
@@ -513,9 +533,16 @@ impl Normalizer {
                 // A failed turn (usage limit, billing, auth, overloaded, …)
                 // carries a terse `error` code here — often with empty content
                 // and no `result` error — so surface it visibly.
+                let limit_text = f.message.blocks().filter(|block| block.kind == "text")
+                    .map(|block| block.text).collect::<Vec<_>>().join(" ");
                 if let Some(code) = &f.error {
+                    let limit_code = usage_limit_code(&limit_text).or_else(|| usage_limit_code(code));
                     out.push(AgentEvent::Error {
-                        code: None, resets_at: None, message: assistant_error_text(code),
+                        code: limit_code.map(str::to_owned), resets_at: None, message: assistant_error_text(code),
+                    });
+                } else if let Some(code) = usage_limit_code(&limit_text) {
+                    out.push(AgentEvent::Error {
+                        code: Some(code.into()), resets_at: None, message: limit_text,
                     });
                 }
                 // The enclosing assistant frame closes the streamed message
@@ -593,7 +620,7 @@ impl Normalizer {
                 };
                 vec![AgentEvent::Error {
                     code: Some(code.into()),
-                    resets_at: f.rate_limit_info.resets_at.and_then(|seconds| seconds.checked_mul(1000)),
+                    resets_at: f.rate_limit_info.resets_at.and_then(reset_millis),
                     message: format!(
                         "Claude {window} limit reached — the turn was blocked. Try again after it resets."
                     ),
@@ -759,6 +786,19 @@ mod tests {
     fn normalize_one(raw: &str) -> Vec<AgentEvent> {
         let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
         Normalizer::new().normalize(frame, false)
+    }
+
+    #[test]
+    fn usage_limit_text_and_reset_units_are_classified() {
+        assert_eq!(usage_limit_code("You've hit your limit for the 5-hour window"), Some("usage_5h"));
+        assert_eq!(usage_limit_code("You've hit your weekly usage limit"), Some("usage_weekly"));
+        assert_eq!(usage_limit_code("rate_limit"), Some("other"));
+        assert_eq!(usage_limit_code("weekly report"), None);
+        assert_eq!(reset_millis(1_786_985_400), Some(1_786_985_400_000));
+        assert_eq!(reset_millis(1_786_985_400_000), Some(1_786_985_400_000));
+        assert_eq!(reset_millis(-1), None);
+        let events = normalize_one(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your weekly usage limit"}]}}"#);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Error { code: Some(code), resets_at: None, .. } if code == "usage_weekly")));
     }
 
     #[test]

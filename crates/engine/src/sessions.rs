@@ -603,6 +603,11 @@ impl SessionsEngine {
         lock(&self.inner.runs).get(chat_id).filter(|run| run.run_id == run_id).map(|run| run.runtime_config.harness_id)
     }
 
+    /// Clamp corrupt or unreasonable reset dates to eight days from observation.
+    fn cap_usage_limit_reset(at: i64) -> i64 {
+        at.min(chrono::Utc::now().timestamp_millis().saturating_add(8 * 24 * 60 * 60 * 1000))
+    }
+
     /// Reset deadline of the latest usage-limited run, if known.
     pub(crate) fn usage_limit_reset(&self, chat_id: &str) -> Option<i64> {
         if let Some(cached) = lock(&self.inner.usage_limits).get(chat_id).copied() {
@@ -613,7 +618,7 @@ impl SessionsEngine {
                 if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
             AgentEvent::SessionStarted { .. } => Some(None),
             _ => None,
-        }).ok().flatten().flatten();
+        }).ok().flatten().flatten().map(Self::cap_usage_limit_reset);
         *lock(&self.inner.usage_limits).entry(chat_id.to_owned()).or_insert(recovered)
     }
 
@@ -1865,7 +1870,7 @@ impl Inner {
                 }
                 AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
                     if code == "usage_5h" || code == "usage_weekly" => {
-                        lock(&self.usage_limits).insert(chat_id.to_owned(), Some(*at));
+                        lock(&self.usage_limits).insert(chat_id.to_owned(), Some(SessionsEngine::cap_usage_limit_reset(*at)));
                     }
                 _ => {}
             }
