@@ -436,10 +436,7 @@ async fn error_codes_map_to_readable_messages() {
             _ => None,
         })
         .collect();
-    assert!(
-        errors.contains(&"Claude usage limit reached — try again after the limit resets."),
-        "assistant error code not mapped: {errors:?}"
-    );
+    assert_eq!(errors.len(), 1, "one error for the same usage limit: {errors:?}");
     assert!(
         errors.contains(
             &"Claude 5-hour limit reached — the turn was blocked. Try again after it resets."
