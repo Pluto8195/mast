@@ -29,11 +29,11 @@ pub enum JournalError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct JournalLine {
-    seq: u64,
+pub struct JournalLine {
+    pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    ts: Option<u64>,
-    event: AgentEvent,
+    pub ts: Option<u64>,
+    pub event: AgentEvent,
 }
 
 struct ChatJournal {
@@ -527,14 +527,21 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
-        let path = self.path_for(chat_id);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let all = read_lines(&path)?;
-        let last_seq = all.last().map(|(seq, _)| *seq).unwrap_or(0);
+        Ok(self.replay_records(chat_id, after_seq)?.into_iter()
+            .map(|record| (record.seq, record.event)).collect())
+    }
+
+    /// Journal records including their optional epoch-millisecond timestamp.
+    /// Records written before timestamps were introduced have no timestamp.
+    pub fn replay_records(
+        &self,
+        chat_id: &str,
+        after_seq: u64,
+    ) -> Result<Vec<JournalLine>, JournalError> {
+        let all = read_lines(&self.path_for(chat_id))?;
+        let last_seq = all.last().map(|record| record.seq).unwrap_or(0);
         let from = if after_seq > last_seq { 0 } else { after_seq };
-        Ok(all.into_iter().filter(|(seq, _)| *seq > from).collect())
+        Ok(all.into_iter().filter(|record| record.seq > from).collect())
     }
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
@@ -629,7 +636,7 @@ fn skill_mtime(path: &Path) -> Option<u128> {
 }
 
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
-fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
+fn read_lines(path: &Path) -> Result<Vec<JournalLine>, JournalError> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -642,7 +649,7 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
             continue;
         }
         match serde_json::from_str::<JournalLine>(&line) {
-            Ok(parsed) => out.push((parsed.seq, parsed.event)),
+            Ok(parsed) => out.push(parsed),
             Err(err) => {
                 tracing::warn!(path = %path.display(), error = %err, "journal: skipping malformed line");
             }
