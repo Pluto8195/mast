@@ -273,7 +273,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "mcp1".into(),
         is_error: true,
-        output: None,
+        output: Some(r#"{"message":"MCP request failed"}"#.into()),
         diff: None,
     }));
 

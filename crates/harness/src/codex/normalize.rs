@@ -539,7 +539,11 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => vec![AgentEvent::ToolResult {
                 id,
                 is_error: status == "failed",
-                output: None,
+                output: ["error", "result"].iter().filter_map(|key| item.get(*key))
+                    .filter(|value| !value.is_null())
+                    .map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
+                    .reduce(|a, b| format!("{a}\n{b}"))
+                    .map(|text| cap_output(&text)),
                 diff: None,
             }],
         },
