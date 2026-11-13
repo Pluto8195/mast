@@ -200,9 +200,15 @@ pub struct WorkOutlineService {
     /// operation id cannot both pass the replay check.
     gate: Mutex<RecentOperations>,
     kept_session: Mutex<Option<KeptSessionResolver>>,
+    workflow_pack: crate::workflow_pack_service::WorkflowPackService,
 }
 
 impl WorkOutlineService {
+    /// Workflow pack import previews, applies, undo and receipts.
+    pub fn workflow_pack(&self) -> &crate::workflow_pack_service::WorkflowPackService {
+        &self.workflow_pack
+    }
+
     /// Whether an operation is already in the replay cache or durable ledger.
     pub(crate) fn operation_was_applied(&self, operation_id: &str) -> bool {
         self.gate.lock().unwrap_or_else(|error| error.into_inner()).get(operation_id).is_some()
@@ -210,6 +216,7 @@ impl WorkOutlineService {
     }
     pub fn new(workspace: WorkspaceHost) -> Self {
         Self {
+            workflow_pack: crate::workflow_pack_service::WorkflowPackService::new(workspace.clone()),
             workspace,
             gate: Mutex::new(RecentOperations::default()),
             kept_session: Mutex::new(None),
