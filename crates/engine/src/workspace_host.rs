@@ -971,6 +971,24 @@ impl WorkspaceHost {
             for pair in operations {
                 staged.apply_work_outline_mutation(&pair.forward, actor, now).map_err(|error| error.to_wire_message())?;
             }
+            // Do not apply a pack whose inverses cannot be guarded and run.
+            for pair in operations.iter().rev() {
+                let snapshot = staged.work_outline_snapshot(space_id, synced);
+                match &pair.forward {
+                    mast_proto::WorkOutlineMutation::CreateWorkItem(created) => {
+                        if crate::workflow_pack::guard_created_item_undo(&snapshot, created)? != pair.inverse {
+                            return Err("Item inverse does not match receipt".into());
+                        }
+                    }
+                    mast_proto::WorkOutlineMutation::CreateWorkItemInstruction(created) => {
+                        crate::workflow_pack::guard_instruction_undo(&snapshot, &crate::workflow_pack::PlannedInstructionAddition {
+                            create: pair.forward.clone(), undo: pair.inverse.clone(), expected_text: created.text.clone(),
+                        })?;
+                    }
+                    _ => return Err("This workflow pack operation cannot yet be undone".into()),
+                }
+                staged.apply_work_outline_mutation(&pair.inverse, actor, now).map_err(|error| error.to_wire_message())?;
+            }
             let mut applied: Vec<crate::workflow_pack::WorkflowPackMutationPair> = Vec::new();
             for pair in operations {
                 if let Err(error) = doc.apply_work_outline_mutation(&pair.forward, actor, now) {
