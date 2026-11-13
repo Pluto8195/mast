@@ -1109,6 +1109,11 @@ impl OrchestratorWakes {
         let now = self.now();
         let mut recorded: HashSet<String> = HashSet::new();
         let mut finished = Vec::new();
+        // Recovery may read a journal once; never do that under the wake lock.
+        let limited_sessions: HashSet<String> = sessions.iter()
+            .filter(|session| session.status == SessionStatus::Errored)
+            .filter(|session| self.inner.sessions.usage_limit_reset(&session.chat_id).is_some_and(|at| at > now))
+            .map(|session| session.chat_id.clone()).collect();
         {
             let mut state = lock(&self.inner.state);
             let seeded = state.sessions_seeded;
@@ -1150,7 +1155,7 @@ impl OrchestratorWakes {
                     _ => continue,
                 };
                 let limited_error = kind == WakeEventKind::Errored
-                    && self.inner.sessions.usage_limit_reset(&session.chat_id).is_some_and(|at| at > now);
+                    && limited_sessions.contains(&session.chat_id);
                 if kind == WakeEventKind::TurnFinished || limited_error {
                     if let Some(start) = state.turn_starts.remove(&session.chat_id) {
                         finished.push((session.clone(), start));
@@ -1676,6 +1681,7 @@ impl OrchestratorWakes {
     fn evaluate_blocking(&self, orch: &str, force: bool) {
         let now = self.now();
         let ctx = self.ctx(orch);
+        let limit_reset = self.inner.sessions.usage_limit_reset(orch).filter(|at| *at > now);
         // Keep selection and queueing under the same lock: several watchers can
         // evaluate the same orchestrator concurrently.
         let mut state = lock(&self.inner.state);
@@ -1723,7 +1729,7 @@ impl OrchestratorWakes {
         if state.hand_off_pending.contains(orch) {
             return;
         }
-        if let Some(reset) = self.inner.sessions.usage_limit_reset(orch).filter(|at| *at > now) {
+        if let Some(reset) = limit_reset {
             drop(state);
             self.arm_timer(orch, reset);
             return;

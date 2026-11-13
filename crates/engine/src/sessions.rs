@@ -169,6 +169,8 @@ struct Inner {
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
+    /// Cached reset deadlines; a missing key has not yet been read from the journal.
+    usage_limits: Mutex<HashMap<String, Option<i64>>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     worker_signals: broadcast::Sender<WorkerSignal>,
     awaiting_inputs: Mutex<HashMap<String, mast_proto::AwaitingInput>>,
@@ -346,6 +348,7 @@ impl SessionsEngine {
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
+                usage_limits: Mutex::new(HashMap::new()),
                 sessions_tx,
                 worker_signals,
                 awaiting_inputs: Mutex::new(HashMap::new()),
@@ -602,12 +605,16 @@ impl SessionsEngine {
 
     /// Reset deadline of the latest usage-limited run, if known.
     pub(crate) fn usage_limit_reset(&self, chat_id: &str) -> Option<i64> {
-        self.inner.journal.find_rev(chat_id, |_, event| match event {
+        if let Some(cached) = lock(&self.inner.usage_limits).get(chat_id).copied() {
+            return cached;
+        }
+        let recovered = self.inner.journal.find_rev(chat_id, |_, event| match event {
             AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
                 if code == "usage_5h" || code == "usage_weekly" => Some(Some(at)),
             AgentEvent::SessionStarted { .. } => Some(None),
             _ => None,
-        }).ok().flatten().flatten()
+        }).ok().flatten().flatten();
+        *lock(&self.inner.usage_limits).entry(chat_id.to_owned()).or_insert(recovered)
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1851,6 +1858,18 @@ impl Inner {
                 0
             }
         };
+        if seq != 0 {
+            match event {
+                AgentEvent::SessionStarted { .. } => {
+                    lock(&self.usage_limits).insert(chat_id.to_owned(), None);
+                }
+                AgentEvent::Error { code: Some(code), resets_at: Some(at), .. }
+                    if code == "usage_5h" || code == "usage_weekly" => {
+                        lock(&self.usage_limits).insert(chat_id.to_owned(), Some(*at));
+                    }
+                _ => {}
+            }
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,
