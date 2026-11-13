@@ -1,7 +1,7 @@
 //! Per-session on-disk event journal (port of zeron's `run-journal.ts`, JSONL-shaped).
 //!
 //! One append-only JSONL file per chat under `{data_dir}/journals/{chat_id}.jsonl`; each
-//! line is `{"seq": n, "event": AgentEvent}` with a monotonically increasing `seq`. The
+//! line is `{"seq": n, "ts": epoch_millis, "event": AgentEvent}` with a monotonically increasing `seq`. The
 //! journal is the durable replay source for live streams (`Subscribe` = replay then tail
 //! the broadcast hub) and the crash-recovery gauge: a journal whose LAST event is not
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
@@ -31,12 +31,15 @@ pub enum JournalError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalLine {
     seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ts: Option<u64>,
     event: AgentEvent,
 }
 
 struct ChatJournal {
     file: File,
     next_seq: u64,
+    last_timestamp: u64,
     /// True when the file ends without a newline (torn write) — the next append
     /// starts with one so the torn line stays isolated.
     needs_newline: bool,
@@ -474,13 +477,14 @@ impl RunJournal {
                 files.clear();
             }
             let path = self.path_for(chat_id);
-            let (next_seq, needs_newline) = scan_tail(&path)?;
+            let (next_seq, last_timestamp, needs_newline) = scan_tail(&path)?;
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             files.insert(
                 chat_id.to_string(),
                 ChatJournal {
                     file,
                     next_seq,
+                    last_timestamp,
                     needs_newline,
                 },
             );
@@ -492,8 +496,14 @@ impl RunJournal {
             )));
         };
         let seq = journal.next_seq;
+        let timestamp = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis().min(u64::MAX as u128) as u64)
+            .max(journal.last_timestamp);
         let line = serde_json::to_string(&JournalLine {
             seq,
+            ts: Some(timestamp),
             event: event.clone(),
         })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
@@ -506,6 +516,7 @@ impl RunJournal {
         journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
+        journal.last_timestamp = timestamp;
         Ok(seq)
     }
 
@@ -709,11 +720,11 @@ fn last_valid_line(path: &Path) -> Result<Option<(u64, AgentEvent)>, JournalErro
 }
 
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.
-fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
+fn scan_tail(path: &Path) -> Result<(u64, u64, bool), JournalError> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, false)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, 0, false)),
         Err(e) => return Err(e.into()),
     };
     let len = file.metadata()?.len();
@@ -726,8 +737,13 @@ fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
         last[0] != b'\n'
     };
     drop(file);
-    let next_seq = last_valid_line(path)?.map(|(seq, _)| seq + 1).unwrap_or(1);
-    Ok((next_seq, needs_newline))
+    let mut last = None;
+    rev_lines(path, |line| {
+        last = serde_json::from_slice::<JournalLine>(line.trim_ascii()).ok();
+        last.is_some()
+    })?;
+    let (next_seq, last_timestamp) = last.map(|line| (line.seq + 1, line.ts.unwrap_or(0))).unwrap_or((1, 0));
+    Ok((next_seq, last_timestamp, needs_newline))
 }
 
 /// Journal (`.jsonl`) and resume-budget (`.resume`) paths for `chat_id` under an
@@ -764,6 +780,7 @@ mod tests {
     fn journal_line(seq: u64, text: &str) -> String {
         serde_json::to_string(&JournalLine {
             seq,
+            ts: None,
             event: AgentEvent::TextDelta { text: text.into() },
         })
         .unwrap()
