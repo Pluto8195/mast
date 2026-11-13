@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
                     .with(
                         tracing_subscriber::fmt::layer()
                             .with_ansi(false)
-                            .with_writer(std::sync::Arc::new(file)),
+                            .with_writer(file),
                     )
                     .init(),
                 None => registry.init(),
@@ -557,131 +557,161 @@ async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `{data_dir}/logs/mast-{mode}.log`, previous launch preserved as `.old`.
-/// Headed and headless are separate files so an embedded-engine app and a
-/// daemon on the same machine never interleave writes.
-///
-/// The returned file holds an exclusive `flock` for the process lifetime:
-/// rotate-on-launch is only safe when nothing is still WRITING the current
-/// file. On 2026-08-04 a dev build launched twice next to the running
-/// installed app — the first rename put the daemon's live log at `.old`, the
-/// second unlinked it entirely, and the daemon spent the rest of the incident
-/// logging to an orphaned inode (an entire day of sync diagnostics gone at
-/// the exact moment they were needed). A launch that finds the canonical file
-/// locked logs to `mast-{mode}.{pid}.log` instead; the next lock-holding
-/// launch sweeps pid-suffixed files older than a week.
-fn open_log_file(mode: &str) -> Option<std::fs::File> {
-    let dir = paths::data_dir().join("logs");
-    open_log_file_in(&dir, mode)
+/// Append to the current day's log; keep at most seven days and about 5 MiB.
+fn open_log_file(mode: &str) -> Option<DailyLog> {
+    open_log_file_in(&paths::data_dir().join("logs"), mode)
 }
 
-/// Dir-parameterized body of [`open_log_file`] (unit-testable without env).
-fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> {
-    std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join(format!("mast-{mode}.log"));
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        // Probe the CURRENT inode for a live writer before touching it.
-        let preexisting = path.exists();
-        let existing = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .ok()?;
-        let rc = unsafe { libc::flock(existing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            // A live process owns the canonical log — leave it alone.
-            return std::fs::File::create(
-                dir.join(format!("mast-{mode}.{}.log", std::process::id())),
-            )
-            .ok();
-        }
-        // No live writer: rotate, create fresh, and lock it as ours. (The
-        // probe's flock dies with `existing`; a first-ever launch has nothing
-        // to rotate — the probe itself created the empty file.)
-        drop(existing);
-        if preexisting {
-            let _ = std::fs::rename(&path, dir.join(format!("mast-{mode}.log.old")));
-        }
-        let file = std::fs::File::create(&path).ok()?;
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        sweep_stale_pid_logs(dir, mode);
-        Some(file)
+const LOG_DAY_BYTES: u64 = 5 * 1024 * 1024 / 7;
+const LOG_DAY_SECONDS: u64 = 24 * 60 * 60;
+
+fn log_day() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_secs() / LOG_DAY_SECONDS
+}
+
+struct DailyLog {
+    state: std::sync::Mutex<LogState>,
+}
+
+struct LogState {
+    dir: std::path::PathBuf,
+    mode: String,
+    file: std::fs::File,
+    day: u64,
+    canonical: bool,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DailyLog {
+    type Writer = LogGuard<'a>;
+    fn make_writer(&'a self) -> Self::Writer {
+        LogGuard(self.state.lock().unwrap_or_else(|e| e.into_inner()))
     }
+}
+
+struct LogGuard<'a>(std::sync::MutexGuard<'a, LogState>);
+impl std::io::Write for LogGuard<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.prepare(log_day())?;
+        std::io::Write::write(&mut self.0.file, bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(&mut self.0.file) }
+}
+
+fn log_path(dir: &std::path::Path, mode: &str) -> std::path::PathBuf {
+    dir.join(format!("mast-{mode}.log"))
+}
+
+fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
+    std::fs::create_dir_all(dir).ok()?;
+    // Only legacy log files in this directory are eligible for removal.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|n| n.starts_with("zeron-") && n.ends_with(".log"))
+                && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let path = log_path(dir, mode);
+    let open = |path: &std::path::Path| std::fs::OpenOptions::new().read(true).append(true).create(true).open(path);
+    let mut file = open(&path).ok()?;
+    #[cfg(unix)]
+    let canonical = {
+        use std::os::fd::AsRawFd;
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    };
     #[cfg(not(unix))]
-    {
-        let _ = std::fs::rename(&path, dir.join(format!("mast-{mode}.log.old")));
-        std::fs::File::create(&path).ok()
+    let canonical = true;
+    if !canonical {
+        file = open(&dir.join(format!("mast-{mode}.{}.log", std::process::id()))).ok()?;
+    }
+    let day = file.metadata().ok().and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() / LOG_DAY_SECONDS).unwrap_or_else(log_day);
+    let mut state = LogState { dir: dir.to_owned(), mode: mode.into(), file, day, canonical };
+    state.prepare(log_day()).ok()?;
+    Some(DailyLog { state: std::sync::Mutex::new(state) })
+}
+
+impl LogState {
+    fn prepare(&mut self, today: u64) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        if self.canonical && self.day < today {
+            let current = log_path(&self.dir, &self.mode);
+            let archive = self.dir.join(format!("mast-{}.day-{}.log", self.mode, self.day));
+            std::fs::rename(&current, archive)?;
+            let replacement = std::fs::OpenOptions::new().read(true).append(true).create(true).open(&current)?;
+            #[cfg(unix)] {
+                use std::os::fd::AsRawFd;
+                if unsafe { libc::flock(replacement.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            self.file = replacement;
+            self.day = today;
+        }
+        if self.canonical {
+            let prefix = format!("mast-{}.day-", self.mode);
+            if let Ok(entries) = std::fs::read_dir(&self.dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let day = name.to_str().and_then(|n| n.strip_prefix(&prefix))
+                        .and_then(|n| n.strip_suffix(".log")).and_then(|n| n.parse::<u64>().ok());
+                    if day.is_some_and(|day| day.saturating_add(6) < today) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+        let len = self.file.metadata()?.len();
+        if len > LOG_DAY_BYTES {
+            self.file.seek(SeekFrom::Start(len - LOG_DAY_BYTES / 2))?;
+            let mut tail = Vec::new();
+            self.file.read_to_end(&mut tail)?;
+            self.file.set_len(0)?;
+            self.file.write_all(&tail)?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(all(test, unix))]
 mod log_file_tests {
-    use super::open_log_file_in;
+    use super::*;
+    use std::io::Write;
+    use tracing_subscriber::fmt::MakeWriter;
 
     #[test]
-    fn second_launch_never_rotates_a_live_processes_log() {
+    fn logs_rotate_by_day_and_keep_live_writer_separate() {
         let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        // First launch owns the canonical file and keeps writing.
-        let first = open_log_file_in(dir, "headed").expect("first log");
-        assert!(dir.join("mast-headed.log").is_file());
-        // Second launch while the first is alive: canonical file untouched,
-        // pid-suffixed overflow file instead (the 2026-08-04 clobber).
-        let second = open_log_file_in(dir, "headed").expect("second log");
-        let pid_path = dir.join(format!("mast-headed.{}.log", std::process::id()));
-        assert!(pid_path.is_file(), "expected pid-suffixed overflow log");
-        assert!(
-            !dir.join("mast-headed.log.old").exists(),
-            "live canonical log must not be rotated away"
-        );
+        let first = open_log_file_in(dir.path(), "headed").unwrap();
+        writeln!(first.make_writer(), "first").unwrap();
+        let second = open_log_file_in(dir.path(), "headed").unwrap();
+        assert!(!second.state.lock().unwrap().canonical);
         drop(second);
-        // After the owner exits, a fresh launch rotates normally.
-        drop(first);
-        let third = open_log_file_in(dir, "headed").expect("third log");
-        assert!(
-            dir.join("mast-headed.log.old").is_file(),
-            "rotation resumes"
-        );
-        drop(third);
+        let mut state = first.state.lock().unwrap();
+        let day = state.day;
+        state.prepare(day + 1).unwrap();
+        assert!(dir.path().join(format!("mast-headed.day-{day}.log")).exists());
+        state.prepare(day + 7).unwrap();
+        assert!(!dir.path().join(format!("mast-headed.day-{day}.log")).exists());
     }
-}
 
-/// Delete `mast-{mode}.{pid}.log` overflow files older than a week — they
-/// only exist when a second instance raced a live one for the canonical log.
-#[cfg(unix)]
-fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    // Overflow logs from before the rename carry the old `zeron-` prefix.
-    let prefixes = [format!("mast-{mode}."), format!("zeron-{mode}.")];
-    let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(middle) = prefixes
-            .iter()
-            .find_map(|prefix| name.strip_prefix(prefix.as_str()))
-            .and_then(|rest| rest.strip_suffix(".log"))
-        else {
-            continue;
-        };
-        if !middle.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > week);
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
-        }
+    #[test]
+    fn removes_only_legacy_logs_and_bounds_current_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zeron-headed.log"), b"legacy").unwrap();
+        std::fs::write(dir.path().join("zeron-notes.txt"), b"keep").unwrap();
+        let log = open_log_file_in(dir.path(), "headed").unwrap();
+        assert!(!dir.path().join("zeron-headed.log").exists());
+        assert!(dir.path().join("zeron-notes.txt").exists());
+        let mut state = log.state.lock().unwrap();
+        state.file.write_all(&vec![b'x'; LOG_DAY_BYTES as usize + 1]).unwrap();
+        let day = state.day;
+        state.prepare(day).unwrap();
+        assert!(state.file.metadata().unwrap().len() <= LOG_DAY_BYTES);
     }
 }
 
