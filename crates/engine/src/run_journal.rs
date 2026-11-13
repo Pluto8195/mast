@@ -1057,6 +1057,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_event_fields_remain_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.jsonl");
+        let legacy = concat!(
+            "{\"seq\":1,\"event\":{\"type\":\"toolResult\",\"id\":\"tool\",\"isError\":true}}\n",
+            "{\"seq\":2,\"event\":{\"type\":\"error\",\"message\":\"failed\"}}\n"
+        );
+        std::fs::write(&path, legacy).unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let records = journal.replay_records("chat", 0).unwrap();
+        assert!(matches!(&records[0].event, AgentEvent::ToolResult { exit_code: None, .. }));
+        assert!(matches!(&records[1].event, AgentEvent::Error { code: None, resets_at: None, .. }));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
+    }
+
+    #[test]
     fn timestamps_round_trip_and_preserve_legacy_records() {
         let dir = tempfile::tempdir().unwrap();
         let journal = RunJournal::open(dir.path()).unwrap();
