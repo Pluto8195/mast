@@ -78,7 +78,7 @@ impl Harness for ResumeRejectingHarness {
         let call = { let mut requests = self.requests.lock().unwrap(); requests.push(request.clone()); requests.len() };
         let mut events = Vec::new();
         if call != 3 {
-            events.push(Ok(AgentEvent::SessionStarted { harness: HarnessId::Mock, model: "mock".into(), tools: vec![], cwd: request.cwd, session_id: "saved-session".into(), assistant_message_id: format!("assistant-{call}") }));
+            events.push(Ok(AgentEvent::SessionStarted { harness: HarnessId::Mock, model: "mock".into(), tools: vec![], cwd: request.cwd, session_id: "saved-session".into(), assistant_message_id: format!("assistant-{call}"), chat_id: None, space_id: None }));
         }
         if call == 1 || call == 4 {
             events.push(Ok(AgentEvent::TextDelta { text: "done".into() }));
