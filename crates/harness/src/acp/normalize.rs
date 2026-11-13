@@ -459,6 +459,7 @@ fn resolved_result(update: &Value, id: String) -> Option<AgentEvent> {
         id,
         is_error,
         output: tool_output(update),
+        exit_code: None,
         diff: tool_diff(update),
     })
 }

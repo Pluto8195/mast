@@ -915,6 +915,7 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                             id: id.clone(),
                             is_error,
                             output: None,
+                            exit_code: None,
                             diff: None,
                         }),
                     ];
