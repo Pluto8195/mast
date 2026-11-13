@@ -28,6 +28,14 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 87: worker Changes in one click + GitHub-style file tree** (2026-11-13, 4c4dc0d61; UI 2634/0, mast-gallery
+  8/8): Team, Item and running-chat worker rows get a "Changes" link (worktree first, pushed-branch fallback; was 3
+  clicks); Ready to merge diff links use the same path. Changes file tree: collapsible folders with per-diff state,
+  collapse/expand-all icon buttons, compacted single-child paths, file icons, counts on collapsed folders, ←/→ on a
+  focused folder, draggable persisted width. The coordinator moved the Changes link into
+  `shell_parts::worker_action_link` to keep the component-lint text-size ratchet at 410.
+  Backup: `~/zeron-dev-app-backups/mast-release-86`.
+
 - **Release 86: Needs-you cards in place + smaller coordinator reads** (2026-11-12, eeb144b88; tests for touched
   crates from f45e1be44: nextest 2500/2502, only the known `peer::actual_webrtc_pair_streams…` and
   `preview::leak remote_preview_churn` hang; UI 2630/0): a decision sheet's or plan's Needs-you card is keyed on the
@@ -1146,7 +1154,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
-- **Installed: release 86.**
+- **Installed: release 87.**
 - **Orchestrator friction** (report mast-artifact:1e838a8e, item 62aa8fe0): Mikey picked all four fixes.
   - Skill edits are live in `~/.agents/skills` (implement-ticket, project-planner, talk-to-me); backup in
     `~/skills-backups/2026-11-12-friction/`; awaiting his keep/undo (request 289320e7). He still has to paste the
