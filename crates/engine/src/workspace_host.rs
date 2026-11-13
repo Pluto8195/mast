@@ -943,6 +943,51 @@ impl WorkspaceHost {
         self.work_outline_mutate_admin(mutation, actor, None, ledger_keys)
     }
 
+    /// Apply a prepared pack under one registry lock after validating it on a
+    /// private copy. If a live write unexpectedly fails, compensate in reverse
+    /// order while still holding the lock and report any compensation failures.
+    pub(crate) fn apply_workflow_pack_batch(
+        &self,
+        space_id: &str,
+        pack: &mast_proto::workflow_pack::WorkflowPack,
+        scopes: &[mast_proto::workflow_pack::WorkflowPackScopePreview],
+        templates: &[mast_proto::workflow_pack::WorkflowPackTemplatePreview],
+        operations: &[crate::workflow_pack::WorkflowPackMutationPair],
+        actor: &mast_proto::WorkOutlineActor,
+    ) -> Result<Vec<crate::workflow_pack::WorkflowPackMutationPair>, String> {
+        if crate::work_outline::writes_disabled() {
+            return Err("Work Outline changes are turned off on this device".into());
+        }
+        if actor.kind != mast_proto::WorkOutlineActorKind::User {
+            return Err("Only the user can apply a workflow pack".into());
+        }
+        let synced = self.registry_synced();
+        let now = Utc::now().timestamp_millis();
+        self.mutate(|doc| {
+            let snapshot = doc.work_outline_snapshot(space_id, synced);
+            crate::workflow_pack::revalidate_import_preview(pack, &snapshot, scopes, templates)?;
+            let bytes = doc.to_bytes().map_err(|error| error.to_string())?;
+            let mut staged = RegistryDoc::from_bytes(&bytes, doc.device_id()).map_err(|error| error.to_string())?;
+            for pair in operations {
+                staged.apply_work_outline_mutation(&pair.forward, actor, now).map_err(|error| error.to_wire_message())?;
+            }
+            let mut applied: Vec<crate::workflow_pack::WorkflowPackMutationPair> = Vec::new();
+            for pair in operations {
+                if let Err(error) = doc.apply_work_outline_mutation(&pair.forward, actor, now) {
+                    let mut failures = Vec::new();
+                    for completed in applied.iter().rev() {
+                        if let Err(undo_error) = doc.apply_work_outline_mutation(&completed.inverse, actor, now) {
+                            failures.push(undo_error.to_wire_message());
+                        }
+                    }
+                    return Err(format!("{}; compensation failures: {}", error.to_wire_message(), failures.join(", ")));
+                }
+                applied.push(pair.clone());
+            }
+            Ok(applied)
+        })
+    }
+
     /// [`Self::work_outline_mutate`] for an agent holding a live admin grant
     /// on `admin_space` (the engine re-checks the grant per call).
     pub fn work_outline_mutate_admin(
@@ -2754,6 +2799,34 @@ impl mast_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{ChatLinkKind, WorkspaceHost, device_name_on_boot, linked_worktree_root};
+
+    #[tokio::test]
+    async fn workflow_pack_batch_applies_instruction_after_preview() {
+        use super::*;
+        use crate::workflow_pack::{WorkflowPackMutationPair, plan_instruction_additions};
+        use mast_proto::workflow_pack::{WorkflowPack, WorkflowPackMode, WorkflowPackScope, WORKFLOW_PACK_FORMAT, preview_instruction_import, preview_template_import};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(store, WorkspaceHostConfig {
+            device_id:"device".into(), device_name:"Test".into(), platform:"macos".into(),
+            org_id:"org".into(), user_id:"user".into(), edge:None,
+        }).unwrap();
+        host.create_space("space", "device", "/tmp/example", None, false).unwrap();
+        let snapshot = host.read(|doc| doc.work_outline_snapshot("space", true));
+        let pack = WorkflowPack { format:WORKFLOW_PACK_FORMAT.into(), mode:WorkflowPackMode::Full,
+            scopes:vec![WorkflowPackScope { item_path:vec![], instructions:vec!["Rule".into()] }], templates:vec![] };
+        let scopes = preview_instruction_import(&pack, &snapshot).unwrap();
+        let templates = preview_template_import(&pack, &snapshot).unwrap();
+        let pairs: Vec<_> = plan_instruction_additions(&snapshot, &scopes, "import").unwrap().into_iter()
+            .map(|addition| WorkflowPackMutationPair { forward:addition.create, inverse:addition.undo }).collect();
+        let actor = mast_proto::WorkOutlineActor { kind:mast_proto::WorkOutlineActorKind::User,
+            device_id:"device".into(), chat_id:None, message_id:None };
+        let receipt = host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).unwrap();
+        assert_eq!(receipt.len(), 1);
+        let after = host.read(|doc| doc.work_outline_snapshot("space", true));
+        assert!(after.instructions.iter().any(|row| !row.archived() && row.text == "Rule"));
+        assert!(host.apply_workflow_pack_batch("space", &pack, &scopes, &templates, &pairs, &actor).is_err());
+    }
 
     #[tokio::test]
     async fn space_prompt_migration_preserves_existing_and_initializes_new_spaces() {

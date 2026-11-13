@@ -18,6 +18,13 @@ use serde::Deserialize;
 /// Maximum serialized size accepted from an untrusted pack file.
 pub const MAX_WORKFLOW_PACK_BYTES: u64 = 4 * 1024 * 1024;
 
+/// One forward operation and the operation that reverses it.
+#[derive(Debug, Clone)]
+pub struct WorkflowPackMutationPair {
+    pub forward: WorkOutlineMutation,
+    pub inverse: WorkOutlineMutation,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportPreviewParams {
