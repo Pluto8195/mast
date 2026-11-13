@@ -627,6 +627,15 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
     let canonical = true;
     if !canonical {
         file = open(&dir.join(format!("mast-{mode}.{}.log", std::process::id()))).ok()?;
+        #[cfg(unix)] {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return None;
+            }
+        }
+    } else {
+        #[cfg(unix)]
+        sweep_stale_overflow_logs(dir, mode);
     }
     let day = file.metadata().ok().and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -634,6 +643,28 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<DailyLog> {
     let mut state = LogState { dir: dir.to_owned(), mode: mode.into(), file, day, canonical, swept_day: None };
     state.prepare(log_day()).ok()?;
     Some(DailyLog { state: std::sync::Mutex::new(state) })
+}
+
+/// Retire old overflow files only when no live process holds their lock.
+#[cfg(unix)]
+fn sweep_stale_overflow_logs(dir: &std::path::Path, mode: &str) {
+    use std::os::fd::AsRawFd;
+    let prefix = format!("mast-{mode}.");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|name| name.strip_suffix(".log")) else { continue };
+        if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) { continue; }
+        let stale = entry.metadata().and_then(|meta| meta.modified()).ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > 7 * LOG_DAY_SECONDS);
+        if !stale { continue; }
+        let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(entry.path()) else { continue };
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 impl LogState {
