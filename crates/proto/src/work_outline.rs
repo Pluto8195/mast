@@ -1370,6 +1370,14 @@ pub struct ArchiveWorkItemInstructionParams {
     pub operation_id: String,
 }
 
+/// Restore an archived instruction without changing its identity or order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreWorkItemInstructionParams {
+    pub instruction_id: String,
+    pub operation_id: String,
+}
+
 /// `createInstructionRevision`: snapshot the item's current effective
 /// instructions. Reply: `revisionId` = `derive_id(operationId, "revision")`.
 /// Over budget fails with `limitExceeded` before any write.
@@ -1514,6 +1522,7 @@ pub enum WorkOutlineMutation {
     UpdateWorkItemInstruction(UpdateWorkItemInstructionParams),
     MoveWorkItemInstruction(MoveWorkItemInstructionParams),
     ArchiveWorkItemInstruction(ArchiveWorkItemInstructionParams),
+    RestoreWorkItemInstruction(RestoreWorkItemInstructionParams),
     CreateInstructionRevision(CreateInstructionRevisionParams),
     ApplyInstructionRevision(ApplyInstructionRevisionParams),
     KeepInstructionSession(KeepInstructionSessionParams),
@@ -1538,6 +1547,7 @@ pub enum WorkOutlineMutation {
     SetLinearAssignedDestination(SetLinearAssignedDestinationParams),
     // ── Project templates ──
     SaveWorkItemTemplate(crate::work_outline_templates::SaveWorkItemTemplateParams),
+    ImportWorkItemTemplate(crate::work_outline_templates::ImportWorkItemTemplateParams),
     DeleteWorkItemTemplate(crate::work_outline_templates::DeleteWorkItemTemplateParams),
     // ── Container templates ──
     SetContainerTemplate(crate::work_outline_container_templates::SetContainerTemplateParams),
@@ -1562,6 +1572,7 @@ impl WorkOutlineMutation {
             Self::UpdateWorkItemInstruction(p) => &p.operation_id,
             Self::MoveWorkItemInstruction(p) => &p.operation_id,
             Self::ArchiveWorkItemInstruction(p) => &p.operation_id,
+            Self::RestoreWorkItemInstruction(p) => &p.operation_id,
             Self::CreateInstructionRevision(p) => &p.operation_id,
             Self::ApplyInstructionRevision(p) => &p.operation_id,
             Self::KeepInstructionSession(p) => &p.operation_id,
@@ -1581,6 +1592,7 @@ impl WorkOutlineMutation {
             Self::SetApprovalRule(p) => &p.operation_id,
             Self::SetLinearAssignedDestination(p) => &p.operation_id,
             Self::SaveWorkItemTemplate(p) => &p.operation_id,
+            Self::ImportWorkItemTemplate(p) => &p.operation_id,
             Self::DeleteWorkItemTemplate(p) => &p.operation_id,
             Self::SetContainerTemplate(p) => &p.operation_id,
             Self::ApplyContainerTemplate(p) => &p.operation_id,
@@ -1604,6 +1616,7 @@ impl WorkOutlineMutation {
             Self::UpdateWorkItemInstruction(_) => "updateWorkItemInstruction",
             Self::MoveWorkItemInstruction(_) => "moveWorkItemInstruction",
             Self::ArchiveWorkItemInstruction(_) => "archiveWorkItemInstruction",
+            Self::RestoreWorkItemInstruction(_) => "restoreWorkItemInstruction",
             Self::CreateInstructionRevision(_) => "createInstructionRevision",
             Self::ApplyInstructionRevision(_) => "applyInstructionRevision",
             Self::KeepInstructionSession(_) => "keepInstructionSession",
@@ -1623,6 +1636,7 @@ impl WorkOutlineMutation {
             Self::SetApprovalRule(_) => "setApprovalRule",
             Self::SetLinearAssignedDestination(_) => "setLinearAssignedDestination",
             Self::SaveWorkItemTemplate(_) => "saveWorkItemTemplate",
+            Self::ImportWorkItemTemplate(_) => "importWorkItemTemplate",
             Self::DeleteWorkItemTemplate(_) => "deleteWorkItemTemplate",
             Self::SetContainerTemplate(_) => "setContainerTemplate",
             Self::ApplyContainerTemplate(_) => "applyContainerTemplate",
@@ -1647,6 +1661,7 @@ impl WorkOutlineMutation {
                 | Self::UpdateWorkItemInstruction(_)
                 | Self::MoveWorkItemInstruction(_)
                 | Self::ArchiveWorkItemInstruction(_)
+                | Self::RestoreWorkItemInstruction(_)
                 | Self::CreateInstructionRevision(_)
                 | Self::ApplyInstructionRevision(_)
                 | Self::KeepInstructionSession(_)

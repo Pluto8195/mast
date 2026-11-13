@@ -3251,6 +3251,57 @@ impl RpcService for EngineRpc {
                 let p: mast_proto::WatchWorkOutlineParams = parse_params(params)?;
                 Ok(RpcReply::Stream(self.work_outline.watch(p.space_id)))
             }
+            methods::WORKFLOW_PACK_EXPORT_PREVIEW => {
+                let p: crate::workflow_pack::ExportPreviewParams = parse_params(params)?;
+                let (pack, redactions) = self
+                    .work_outline
+                    .workflow_pack()
+                    .export_preview(&p.space_id, p.mode)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"pack": pack, "redactions": redactions}))
+            }
+            methods::WORKFLOW_PACK_IMPORT_PREVIEW => {
+                let p: crate::workflow_pack::ImportPreviewParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let preview = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().preview_import(&p.space_id, &p.path)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&preview)
+            }
+            methods::WORKFLOW_PACK_APPLY => {
+                let p: crate::workflow_pack::ApplyParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let receipt = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().apply(&p.space_id, &p.preview_id, &p.resolutions, &service.local_user(), None)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&receipt)
+            }
+            methods::WORKFLOW_PACK_UNDO => {
+                let p: crate::workflow_pack::UndoParams = parse_params(params)?;
+                let service = self.work_outline.clone();
+                let receipt = tokio::task::spawn_blocking(move || {
+                    service.workflow_pack().undo(&p.space_id, &p.receipt_id, &service.local_user(), None)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&receipt)
+            }
+            methods::WORKFLOW_PACK_RECEIPTS => {
+                let p: crate::workflow_pack::ReceiptsParams = parse_params(params)?;
+                let receipts = self
+                    .work_outline
+                    .workflow_pack()
+                    .list_receipts(&p.space_id)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({"receipts": receipts}))
+            }
             methods::WORK_OUTLINE_MUTATE => {
                 let mutation: mast_proto::WorkOutlineMutation = parse_params(params)?;
                 self.linear_mutation_gate(&mutation)?;
@@ -5714,6 +5765,7 @@ mod tests {
             assert!(!is_stream_method(github));
         }
         assert!(!forwardable(methods::WORK_OUTLINE_QUERY));
+        assert!(!forwardable(methods::WORKFLOW_PACK_APPLY));
         assert!(!is_stream_method(methods::WORK_OUTLINE_QUERY));
         assert!(!is_stream_method(methods::WATCH_WORK_OUTLINE));
         // Execution validation runs against the owner's disk.

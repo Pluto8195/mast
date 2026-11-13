@@ -13,6 +13,7 @@ uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 pulldown-cmark.workspace = true
+regex = "1"
 
 [dev-dependencies]
 ctor = "1"

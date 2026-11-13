@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use mast_proto::work_outline::{WorkOutlineErrorCode, WorkOutlineRepair, derive_id, roles};
 use mast_proto::work_outline_templates::{
-    DeleteWorkItemTemplateParams, SaveWorkItemTemplateParams, TemplateNode, WorkItemTemplateLink,
+    DeleteWorkItemTemplateParams, ImportWorkItemTemplateParams, SaveWorkItemTemplateParams, TemplateNode, WorkItemTemplateLink,
     WorkItemTemplateView, freeze_project_subtree, template_limits,
 };
 use serde_json::{Value, json};
@@ -97,6 +97,43 @@ fn check_template_name(name: &str) -> Outcome<String> {
 }
 
 impl RegistryDoc {
+    /// Save a frozen body directly, without linking or creating a source item.
+    pub fn import_work_item_template(&mut self, p: &ImportWorkItemTemplateParams, now_ms: i64) -> Outcome<String> {
+        check_operation_id(&p.operation_id)?;
+        self.require_space(&p.space_id)?;
+        let name = check_template_name(&p.name)?;
+        let id = p.template_id.clone().unwrap_or_else(|| derive_id(&p.operation_id, roles::TEMPLATE));
+        check_id("template", &id)?;
+        let existing = match self.row_state(KIND_WORK_ITEM_TEMPLATES, &id) {
+            RowState::Live => Some(self.live_template(&id)?),
+            RowState::Absent if p.template_id.is_none() => None,
+            _ => return Err(not_found("Template not found")),
+        };
+        if let Some(existing) = &existing {
+            if existing.space_id != p.space_id { return Err(err(WorkOutlineErrorCode::CrossSpace, "The template belongs to another Space")); }
+            if self.overlay_row(KIND_WORK_ITEM_TEMPLATES, &id).and_then(|row| str_field(&row, "lastOperationId")).as_deref() == Some(&p.operation_id) { return Ok(id); }
+        }
+        if self.templates_of_space(&p.space_id).iter().any(|t| t.id != id && t.name.to_lowercase() == name.to_lowercase()) {
+            return Err(invalid(format!("A template named \"{name}\" already exists in this Space")));
+        }
+        p.body.check_limits().map_err(|message| err(WorkOutlineErrorCode::LimitExceeded, message))?;
+        let body = serde_json::to_value(&p.body).map_err(|error| invalid(error.to_string()))?;
+        if body.to_string().encode_utf16().count() > template_limits::MAX_TEMPLATE_BODY_UTF16_UNITS {
+            return Err(err(WorkOutlineErrorCode::LimitExceeded, "The template body is too large"));
+        }
+        let revision = existing.as_ref().map_or(1, |t| t.revision.saturating_add(1));
+        let mut fields = BTreeMap::from([
+            ("name".into(), json!(name)), ("revision".into(), json!(revision)),
+            ("body".into(), body), ("updatedAt".into(), json!(now_ms)),
+            ("lastOperationId".into(), json!(p.operation_id)),
+        ]);
+        let row = if existing.is_some() { Planned::update(KIND_WORK_ITEM_TEMPLATES, &id, fields) } else {
+            fields.extend([("spaceId".into(), json!(p.space_id)), ("createdAt".into(), json!(now_ms)), ("v".into(), json!(WORK_OUTLINE_ROW_VERSION))]);
+            Planned::upsert(KIND_WORK_ITEM_TEMPLATES, &id, fields)
+        };
+        self.commit(vec![row], &[])?;
+        Ok(id)
+    }
     /// Live, decodable templates of a Space.
     pub fn templates_of_space(&self, space_id: &str) -> Vec<WorkItemTemplateView> {
         let rows = self.overlay_rows(KIND_WORK_ITEM_TEMPLATES);

@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use mast_proto::work_outline::{
     ApplyInstructionRevisionParams, ArchiveWorkItemInstructionParams,
     CreateInstructionRevisionParams, CreateWorkItemInstructionParams, InstructionPlacement,
-    KeepInstructionSessionParams, MoveWorkItemInstructionParams, UpdateWorkItemInstructionParams,
+    KeepInstructionSessionParams, MoveWorkItemInstructionParams, RestoreWorkItemInstructionParams, UpdateWorkItemInstructionParams,
     WorkItemView,
 };
 use mast_proto::work_outline_instructions::{
@@ -725,6 +725,29 @@ impl RegistryDoc {
             )],
             &[],
         )
+    }
+
+    /// Restore the original row after checking the current scope and budgets.
+    pub fn restore_work_item_instruction(&mut self, p: &RestoreWorkItemInstructionParams, now_ms: i64) -> Outcome<()> {
+        let instruction = self.live_instruction(&p.instruction_id)?;
+        self.require_space(&instruction.space_id)?;
+        if !instruction.archived() { return Ok(()); }
+        self.instruction_scope_item(&instruction.space_id, &instruction.scope())?;
+        let mut instructions = self.instructions_of_space(&instruction.space_id);
+        let scope = instruction.work_item_id.as_deref();
+        if scope_siblings(&instructions, scope, None).len() >= limits::MAX_INSTRUCTIONS_PER_SCOPE {
+            return Err(limit("The instruction scope is full"));
+        }
+        let restored = instructions.iter_mut().find(|i| i.id == p.instruction_id)
+            .ok_or_else(|| not_found("Instruction not found"))?;
+        restored.archived_at = None;
+        restored.archived_by = None;
+        self.check_instruction_budget(&instruction.space_id, scope, &instructions, "Restoring this instruction")?;
+        self.commit(vec![Planned::update(KIND_WORK_ITEM_INSTRUCTIONS, &p.instruction_id, BTreeMap::from([
+            ("archivedAt".to_owned(), Value::Null),
+            ("archivedBy".to_owned(), Value::Null),
+            ("updatedAt".to_owned(), json!(now_ms)),
+        ]))], &[])
     }
 
     // ── revisions and applications ─────────────────────────────────────────

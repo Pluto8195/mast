@@ -260,7 +260,11 @@ pub(crate) fn settings_choice(
         .border_1()
         .when(industrial, |el| el.border_b_2())
         .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
+        .bg(if selected && horizon {
+            // Horizon tints every control with the accent, so the selected
+            // segment needs a clearly stronger fill than its neighbours.
+            theme.accent.opacity(0.32)
+        } else if selected {
             theme.accent_wash
         } else if horizon {
             theme.accent.opacity(0.08)
@@ -277,7 +281,13 @@ pub(crate) fn settings_choice(
         } else {
             gpui::FontWeight::NORMAL
         })
-        .text_color(if selected {
+        .text_color(if selected
+            && (horizon || crate::theme::contrast_ratio(theme.accent, theme.bg) < 4.5)
+        {
+            // A pale accent (Horizon, or a light accent on a light theme)
+            // would read fainter than the unselected labels.
+            theme.text
+        } else if selected {
             theme.accent
         } else {
             theme.text_muted

@@ -443,6 +443,61 @@ fn work_outline_catalog() -> Vec<ToolDef> {
                 "required": ["idempotencyKey"]
             }),
         },
+        ToolDef {
+            name: agent_tool_names::WORKFLOW_PACK_EXPORT,
+            description: "ADMIN CHATS ONLY. Export the Space's Work Outline setup (instructions per item path, and project templates) as a workflow pack: returns `pack` and the `redactions` made (credentials, and in share mode emails and home paths; detection is incomplete, so review before sharing). Writes nothing. Optional: mode (share, the default, or full).",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "mode": { "type": "string", "enum": ["share", "full"], "default": "share" } }
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::WORKFLOW_PACK_PREVIEW_IMPORT,
+            description: "ADMIN CHATS ONLY. Read a workflow pack file on this device and preview importing it into the Space; changes nothing. Returns `previewId`, the `scopes` (instructions by item path, with the destination's current text and any missing items to create) and the `templates`; a scope or template whose `current` differs from its `incoming` is a conflict that apply needs a resolution for. Required: path.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Absolute path of the pack file." } },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::WORKFLOW_PACK_APPLY,
+            description: "ADMIN CHATS ONLY. Apply a previewed workflow pack in one all-or-nothing step and return a receipt. Fails, changing nothing, if the Space changed since the preview. Every conflict needs a resolution in `resolutions`: {scopes:[{itemPath:[titles], resolution}], templates:[{name, resolution}]} where resolution is skip (keep the destination's), append (instructions only: add the missing ones) or replace (archive the destination's instructions or swap the template body). Items the pack needs are created. Required: previewId. Optional: resolutions. Undo with work_outline_workflow_pack_undo.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "previewId": { "type": "string" },
+                    "resolutions": {
+                        "type": "object",
+                        "properties": {
+                            "scopes": { "type": "array", "items": { "type": "object", "properties": {
+                                "itemPath": { "type": "array", "items": { "type": "string" } },
+                                "resolution": { "type": "string", "enum": ["skip", "append", "replace"] }
+                            }, "required": ["itemPath", "resolution"] } },
+                            "templates": { "type": "array", "items": { "type": "object", "properties": {
+                                "name": { "type": "string" },
+                                "resolution": { "type": "string", "enum": ["skip", "replace"] }
+                            }, "required": ["name", "resolution"] } }
+                        }
+                    }
+                },
+                "required": ["previewId"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::WORKFLOW_PACK_UNDO,
+            description: "ADMIN CHATS ONLY. Undo a workflow pack apply from its receipt. Refuses, changing nothing, if anything the import added or replaced was edited, moved, or used since. Required: receiptId.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "receiptId": { "type": "string" } },
+                "required": ["receiptId"]
+            }),
+        },
+        ToolDef {
+            name: agent_tool_names::WORKFLOW_PACK_RECEIPTS,
+            description: "ADMIN CHATS ONLY. List the Space's workflow pack import receipts, newest first, with what each added and whether it was undone.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
     ]
 }
 
@@ -591,6 +646,17 @@ fn friction_catalog() -> Vec<ToolDef> {
         },
     ]
 }
+
+/// The admin-only workflow pack tools; none takes an idempotency key (apply
+/// consumes its preview and undo its receipt, so a retry changes nothing).
+#[cfg(test)]
+const WORKFLOW_PACK_TOOLS: [&str; 5] = [
+    agent_tool_names::WORKFLOW_PACK_EXPORT,
+    agent_tool_names::WORKFLOW_PACK_PREVIEW_IMPORT,
+    agent_tool_names::WORKFLOW_PACK_APPLY,
+    agent_tool_names::WORKFLOW_PACK_UNDO,
+    agent_tool_names::WORKFLOW_PACK_RECEIPTS,
+];
 
 /// Whether `name` is an engine-side agent tool (`AgentToolCall`).
 fn is_engine_agent_tool(name: &str) -> bool {
@@ -2598,6 +2664,7 @@ mod tests {
             if def.name != agent_tool_names::READ_CURRENT
                 && def.name != agent_tool_names::GET_USER_ACTION_REQUEST
                 && def.name != agent_tool_names::READ_SUBTREE
+                && !WORKFLOW_PACK_TOOLS.contains(&def.name)
             {
                 assert!(
                     def.input_schema["properties"]["idempotencyKey"].is_object(),

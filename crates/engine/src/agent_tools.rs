@@ -776,6 +776,7 @@ fn attributed_note(context: &CallContext, note: Option<String>) -> Option<String
 }
 
 mod admin_tool;
+mod workflow_pack_tool;
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
@@ -1047,6 +1048,11 @@ impl AgentToolsService {
             tools::PROPOSE_INSTRUCTION => self.propose_instruction(context, arguments),
             tools::PROPOSE_APPROVAL_RULE => self.propose_approval_rule(context, arguments),
             tools::ADMIN => self.admin(context, arguments),
+            tools::WORKFLOW_PACK_EXPORT
+            | tools::WORKFLOW_PACK_PREVIEW_IMPORT
+            | tools::WORKFLOW_PACK_APPLY
+            | tools::WORKFLOW_PACK_UNDO
+            | tools::WORKFLOW_PACK_RECEIPTS => self.workflow_pack_tool(context, tool, arguments),
             tools::QUEUE_CHILD_CHAT_TURN => self.queue_child_chat_turn(context, arguments),
             tools::CLAIM_CHILD_CHAT => self.claim_child_chat(context, arguments),
             tools::PROJECT_SCOPE_CHATS => Ok(self.project_scope_chats(context)),
