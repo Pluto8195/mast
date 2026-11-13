@@ -805,6 +805,8 @@ mod tests {
         assert_eq!(reset_millis(-1), None);
         let events = normalize_one(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your weekly usage limit"}]}}"#);
         assert!(events.iter().any(|event| matches!(event, AgentEvent::Error { code: Some(code), resets_at: None, .. } if code == "usage_weekly")));
+        let events = normalize_one(r#"{"type":"result","subtype":"error_during_execution","errors":["You've hit your 5-hour limit"]}"#);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Error { code: Some(code), resets_at: None, .. } if code == "usage_5h")));
     }
 
     #[test]
