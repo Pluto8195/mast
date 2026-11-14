@@ -17,8 +17,8 @@
 .mk-open { color: var(--mk-blue); border: 1px dashed currentColor; }
 .mk-decided { color: var(--background); background: var(--foreground); }
 .mk-neutral { color: var(--foreground); background: var(--muted); }
-.mk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; }
-.mk-card { min-width: 0; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+.mk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; min-width: 0; }
+.mk-card { min-width: 0; max-width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
 .mk-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-weight: 700; }
 .mk-table { width: 100%; border-collapse: collapse; text-align: left; }
 .mk-table th, .mk-table td { padding: 5px 10px; vertical-align: top; border-top: 1px solid var(--border); white-space: nowrap; }
@@ -98,3 +98,5 @@
 .mk-sheet .mk-lane .mk-step { position: relative; flex: 0 0 160px; min-width: 0; }
 .mk-sheet .mk-lane .mk-step + .mk-step::before { content: '→'; position: absolute; left: -19px; top: 12px; color: var(--mk-sage); }
 .mk-sheet .mk-step-chip, .mk-sheet .mk-step-params { overflow-wrap: anywhere; }
+.mk-sheet .mk-table th, .mk-sheet .mk-table td { white-space: normal; }
+.mk-sheet .mk-table td.mk-mono { overflow-wrap: anywhere; }
