@@ -174,7 +174,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads chats you created and non-archived chats on items in your item subtree or project.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads your own chat, chats you created, and non-archived chats on items in your item subtree or project.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -184,7 +184,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, or your parent. Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, or your parent. Messages are attributed to your chat, and a chat cannot message itself. A non-child, non-parent target cannot have a wider sandbox or auto-approval when your chat is on Ask. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -1759,27 +1759,29 @@ impl Tools {
                 short(&chat.id)
             );
         }
+        let caller = match origin {
+            Some(origin) => Some(self.zeron.chats().await?.into_iter()
+                .find(|c| c.id == origin.chat_id)
+                .ok_or_else(|| anyhow::anyhow!("this agent's chat no longer exists"))?),
+            None => None,
+        };
+        let caller_parent = caller.as_ref().and_then(|c| c.parent_chat_id.clone());
         if let Some(origin) = origin
             && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
+            && caller_parent.as_deref() != Some(chat.id.as_str())
         {
-            let caller = self.zeron.chats().await?.into_iter().find(|c| c.id == origin.chat_id)
-                .ok_or_else(|| anyhow::anyhow!("this agent's chat no longer exists"))?;
+            let caller = caller.as_ref().expect("agent caller was resolved");
             let caller_sandbox = caller.config.as_ref().map(|c| c.sandbox).unwrap_or(SandboxLevel::WorkspaceWrite);
             let target_sandbox = chat.config.as_ref().map(|c| c.sandbox).unwrap_or(SandboxLevel::WorkspaceWrite);
             if sandbox_rank(target_sandbox) > sandbox_rank(caller_sandbox) {
                 anyhow::bail!("target chat sandbox {} is more permissive than your sandbox {}; messaging it is refused", sandbox_name(target_sandbox), sandbox_name(caller_sandbox));
             }
+            if chat.config.as_ref().is_some_and(|c| c.auto_approve)
+                && !caller.config.as_ref().is_some_and(|c| c.auto_approve)
+            {
+                anyhow::bail!("target chat uses auto-approval but your chat does not; messaging it is refused");
+            }
         }
-        let caller_parent = match origin {
-            Some(origin) => self
-                .zeron
-                .chats()
-                .await?
-                .into_iter()
-                .find(|c| c.id == origin.chat_id)
-                .and_then(|c| c.parent_chat_id),
-            None => None,
-        };
         if let Some(origin) = origin
             && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
             && caller_parent.as_deref() == Some(chat.id.as_str())
@@ -2025,7 +2027,7 @@ impl Tools {
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
-                if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) && c.id == origin.chat_id {
+                if matches!(reach, Reach::CommunicationScope | Reach::MessageScope) && c.id == origin.chat_id {
                     return false;
                 }
                 reachable(origin, c, allow_self, admin_ok)
@@ -2037,7 +2039,7 @@ impl Tools {
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
             if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
-                let extra = if reach == Reach::MessageScope { ", and your parent" } else { "" };
+                let extra = match reach { Reach::MessageScope => ", and your parent", Reach::ReadScope => ", and your own chat", _ => "" };
                 return anyhow::anyhow!(
                     "no chat matches {key:?}: you can reach chats you created and non-archived chats on your item subtree or in your project{extra}"
                 );
@@ -2396,6 +2398,7 @@ mod tests {
         /// When set, chat-beta-2 (the agent) was started by this chat.
         beta_parent: Option<&'static str>,
         alpha_archived: bool,
+        alpha_auto_approve: bool,
         /// When set, alpha's assistant reply is this many bytes long.
         big_reply: Option<usize>,
         /// When set, alpha has a working session row.
@@ -2468,6 +2471,7 @@ mod tests {
                         }),
                     ];
                     chats[0]["archived"] = json!(self.alpha_archived);
+                    chats[0]["config"]["autoApprove"] = json!(self.alpha_auto_approve);
                     if let Some(parent) = self.beta_parent {
                         chats[1]["parentChatId"] = json!(parent);
                     }
@@ -3269,7 +3273,7 @@ mod tests {
         // someone else's chat, beta is the caller, child is its own child.
         let matrix: [(&str, Value, [bool; 3]); 7] = [
             ("get_chat", json!({}), [false, true, true]),
-            ("read_chat", json!({}), [false, false, true]),
+            ("read_chat", json!({}), [false, true, true]),
             (
                 "wait_for_turn",
                 json!({ "timeout_secs": 1 }),
@@ -3382,6 +3386,29 @@ mod tests {
             assert_eq!(create["spaceId"], "space-1");
             assert_eq!(create["parentChatId"], "chat-beta-2");
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_worker_can_message_wider_parent() {
+        let world = Arc::new(World { beta_sandbox: Some("read-only"), beta_parent: Some("chat-alpha-1"), alpha_auto_approve: true, ..World::default() });
+        let sent = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Done"})).await.unwrap();
+        assert_eq!(sent["sent"]["delivery"], "queuedForParent");
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_message_auto_approving_sibling() {
+        let world = Arc::new(World { alpha_auto_approve: true, project_chats: vec!["chat-alpha-1"], ..World::default() });
+        let error = tools(world.clone(), Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Run a command"})).await.unwrap_err();
+        assert!(error.contains("auto-approval"), "{error}");
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_message_itself() {
+        let world = Arc::new(World::default());
+        let error = tools(world.clone(), Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-beta-2", "text":"Loop"})).await.unwrap_err();
+        assert!(error.contains("no chat matches"), "{error}");
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
     }
 
     #[tokio::test]
