@@ -158,7 +158,7 @@ fn cards_show_answered_resolved_and_open_states(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn answering_records_the_answer_and_tells_the_publishing_chat(cx: &mut TestAppContext) {
+fn answering_records_the_answer_and_tells_the_latest_publisher(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     let mut view = plan(Vec::new());
     view.revisions[0].by = WorkOutlineActor {
@@ -198,7 +198,7 @@ fn answering_records_the_answer_and_tells_the_publishing_chat(cx: &mut TestAppCo
     assert_eq!(recorded[0]["answers"].as_array().unwrap().len(), 2);
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["chatId"], "chat-api");
+    assert_eq!(sent[0]["chatId"], "chat-latest");
     assert_eq!(sent[0]["prompt"]["text"], "Answers for Plan: Q-1: By MPN; Q-2: UTC");
     // Optimistically Answered before the snapshot catches up; input closed.
     let drawn = cards(vcx);

@@ -130,11 +130,14 @@ fn open_page<'a>(
     let factory = FakeWebHost::probed_factory(shown.clone(), probe.clone());
     let mut view: ArtifactView = artifact(&id(1), "Flow", kind);
     view.comments = comments;
+    if kind == ArtifactKind::DecisionSheet {
+        view.revisions[0].by.chat_id = Some("chat-latest".into());
+    }
     let state = cx.new(|_| crate::state::AppState::new());
     state.update(cx, |state, _| {
         state.local_device_id = Some("dev".into());
         state.work_outline_actions_override = Some(actions);
-        state.chats = vec![chat("chat-api")];
+        state.chats = vec![chat("chat-api"), chat("chat-latest")];
         state.set_test_artifacts(snapshot(vec![view.clone()]));
     });
     let artifact_id = view.id.clone();
@@ -439,6 +442,7 @@ fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
     assert_eq!(method_calls(&calls, methods::ARTIFACT_SUBMIT_SHEET_DECISIONS).len(), 1);
     let sent = method_calls(&calls, methods::CONTINUE_CHAT_FOR_WORK_ITEM);
     assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["chatId"], "chat-latest");
     let message = sent[0].to_string();
     assert!(message.contains("D-2 answered: Use UTC"));
     assert!(message.contains("D-4 rejected (too slow)"));

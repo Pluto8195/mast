@@ -490,12 +490,7 @@ impl ArtifactQuestionSync {
     /// the artifact's Space; else the artifact's first publisher; else system.
     fn origin_for(&self, artifact: &ArtifactView) -> UserActionRequestOrigin {
         let ws = self.artifacts.workspace();
-        let candidates = artifact
-            .revisions
-            .iter()
-            .filter_map(|r| r.by.chat_id.clone())
-            .take(1)
-            .chain(artifact.chat_id.clone());
+        let candidates = artifact.current_owner_chat_id().into_iter().chain(artifact.chat_id.as_deref());
         for chat_id in candidates {
             let live = ws.chat(&chat_id).ok().flatten().is_some_and(|c| {
                 !c.archived && c.space_id.as_deref() == Some(artifact.space_id.as_str())
@@ -503,7 +498,7 @@ impl ArtifactQuestionSync {
             if live {
                 return UserActionRequestOrigin {
                     kind: UserActionOriginKind::Chat,
-                    chat_id,
+                    chat_id: chat_id.to_owned(),
                     message_id: None,
                     tool_call_id: None,
                 };

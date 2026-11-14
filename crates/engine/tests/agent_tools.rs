@@ -3123,7 +3123,7 @@ async fn project_scope_reaches_other_chats_requests_and_nothing_wider() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
+async fn chat_scope_without_a_project_includes_descendants_and_excludes_siblings() {
     let rig = rig().await;
     let root = create_item(&rig, "np-root", "Plain", None).await;
     let leaf = create_item(&rig, "np-leaf", "Leaf", Some(&root)).await;
@@ -3145,7 +3145,7 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     let reach = tool(&rig, lease.token(), "chat_project_scope_chats", json!({}))
         .await
         .unwrap();
-    assert_eq!(reach["chatIds"], json!([]));
+    assert_eq!(reach["chatIds"], json!([CHAT]));
     let err = tool(
         &rig,
         lease.token(),
@@ -3155,6 +3155,11 @@ async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
     .await
     .unwrap_err();
     assert!(err.contains("work-outline/unauthorized"), "{err}");
+    assign_chat(&rig, "np-root-assign", CHAT, &root).await;
+    assign_chat(&rig, "np-leaf-assign", OTHER_CHAT, &leaf).await;
+    let reach = tool(&rig, lease.token(), "chat_project_scope_chats", json!({})).await.unwrap();
+    let ids = reach["chatIds"].as_array().unwrap();
+    assert!(ids.contains(&json!(CHAT)) && ids.contains(&json!(OTHER_CHAT)));
 }
 
 /// A coordinator on a root item resolves requests raised by chats another

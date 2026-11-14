@@ -237,9 +237,9 @@ impl ArtifactTab {
         if self.comments.busy { self.sheet_refusal("A decision batch is already being sent.", None, cx); return; }
         let draft = crate::settings::current(cx).artifact_decision_drafts.get(&artifact.id).cloned();
         let Some(draft) = draft.filter(|d| d.revision == artifact.current_revision && !d.decisions.is_empty()) else { self.sheet_refusal("There are no staged decisions for this revision.", None, cx); return; };
-        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let chat = artifact.current_owner_chat_id().map(str::to_owned).filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
         let Some(chat) = chat else {
-            self.sheet_refusal("The origin chat is unavailable. Decisions remain staged.", None, cx);
+            self.sheet_refusal("The current owner chat is unavailable. Decisions remain staged.", None, cx);
             return;
         };
         self.comments.busy = true;
