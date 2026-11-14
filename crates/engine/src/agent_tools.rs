@@ -2023,7 +2023,7 @@ impl AgentToolsService {
             .current_item_id()
             .and_then(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-                let project = snapshot.project_root(&root)?.id.clone();
+                let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
                 Some(
                     snapshot
                         .assignments

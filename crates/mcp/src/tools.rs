@@ -173,7 +173,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads the chats you created, yourself, and (read-only) the chats on items inside your own project.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads chats you created, yourself, and non-archived chats on items in your item subtree or project.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -183,7 +183,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, or to your parent chat (the chat that started you). Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For chats you created: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, your parent, or the chat that last messaged you. Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -202,7 +202,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat.",
+            description: "Block until a reachable chat is no longer working (chats you created or non-archived chats on items in your subtree or project): returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. A wait never exceeds 1500 s (the MCP client's idle limit is about 1990 s): if the chat is still working then, turn.status is \"stillRunning\" with turnId and elapsedSecs, and you call wait_for_turn again. Long replies are cut to their tail (turn.truncated, replies[].textOmittedBytes); page the full transcript with read_chat.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -214,7 +214,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
+            description: "Answer a question a reachable chat's agent is blocked on (chats you created or non-archived chats on items in your subtree or project) (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
@@ -1750,7 +1750,7 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let chat = self
-            .reach_chat(origin, &args.chat, Reach::SelfChildOrParent)
+            .reach_chat(origin, &args.chat, Reach::MessageScope)
             .await?;
         if origin.is_some_and(|o| o.chat_id == chat.id) {
             anyhow::bail!(
@@ -1855,7 +1855,7 @@ impl Tools {
         args: WaitArgs,
     ) -> anyhow::Result<Value> {
         let chat = self
-            .reach_chat(origin, &args.chat, Reach::ChildOrAdmin)
+            .reach_chat(origin, &args.chat, Reach::CommunicationScope)
             .await?;
         let turn = self
             .await_turn(&chat, None, false, args.timeout_secs, 0)
@@ -1915,7 +1915,7 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: RespondArgs,
     ) -> anyhow::Result<Value> {
-        let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
+        let chat = self.reach_chat(origin, &args.chat, Reach::CommunicationScope).await?;
         let entries = self.zeron.transcript(&chat.id).await?;
         let rendered = render_entries(&entries, RenderOptions::default());
         let pending = last_pending_input(&rendered)
@@ -1984,18 +1984,18 @@ impl Tools {
         let Some(origin) = origin else {
             return self.zeron.resolve_chat(key).await;
         };
-        let allow_self = !matches!(reach, Reach::Child | Reach::ChildOrAdmin | Reach::ArchiveScope);
+        let allow_self = !matches!(reach, Reach::Child | Reach::ArchiveScope | Reach::CommunicationScope);
         // Admin chats reach their whole Space for everything but interrupt/respond.
         let admin_ok = reach != Reach::Child;
         let all = self.zeron.chats().await?;
-        let parent = (reach == Reach::SelfChildOrParent)
+        let parent = (reach == Reach::MessageScope)
             .then(|| {
                 all.iter()
                     .find(|c| c.id == origin.chat_id)
                     .and_then(|c| c.parent_chat_id.clone())
             })
             .flatten();
-        let project_chats: Vec<String> = if reach == Reach::ReadScope {
+        let project_chats: Vec<String> = if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
             self.zeron
                 .agent_tool(agent_tool_names::PROJECT_SCOPE_CHATS, json!({}))
                 .await
@@ -2010,19 +2010,30 @@ impl Tools {
         } else {
             Vec::new()
         };
+        let last_sender = if reach == Reach::MessageScope {
+            let entries = self.zeron.transcript(&origin.chat_id).await.unwrap_or_default();
+            let messages = render_entries(&entries, RenderOptions::default());
+            messages.iter().rev().filter(|message| message.role == mast_doc::MessageRole::User)
+                .find_map(|message| {
+                    let header = message.text.strip_prefix(mast_proto::RELAYED_MESSAGE_PREFIX)?
+                        .split_once(".]\n")?.0;
+                    let key = header.rsplit_once("chat ")?.1.trim();
+                    resolve_chat_in(&all, key).ok().map(|chat| chat.id)
+                })
+        } else { None };
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
                 reachable(origin, c, allow_self, admin_ok)
                     || parent.as_deref() == Some(c.id.as_str())
-                    || project_chats.contains(&c.id)
+                    || last_sender.as_deref() == Some(c.id.as_str())
+                    || (!c.archived && project_chats.contains(&c.id))
             })
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
-            if reach == Reach::SelfChildOrParent {
+            if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
                 return anyhow::anyhow!(
-                    "no chat matches {key:?}: you can message chats you created and your parent \
-                     chat (list_chats shows them)"
+                    "no chat matches {key:?}: you can reach chats you created, non-archived chats on your item subtree or in your project, your parent, and the chat that last messaged you"
                 );
             }
             anyhow::anyhow!(
@@ -2033,7 +2044,7 @@ impl Tools {
                 } else {
                     ""
                 },
-                if reach == Reach::ReadScope {
+                if reach == Reach::CommunicationScope {
                     ", and read the chats on items in their own project"
                 } else if reach == Reach::ArchiveScope {
                     ", and archive the workers in their own project"
@@ -2240,13 +2251,11 @@ enum Reach {
     /// reaches every chat of its Space.
     SelfOrChild,
     /// Those, the caller itself, or the caller's parent chat (`send_message`).
-    SelfChildOrParent,
+    CommunicationScope,
+    MessageScope,
+    ReadScope,
     /// Those, or any chat on an item inside the caller's project (read-only:
     /// `read_chat` only, never a send).
-    ReadScope,
-    /// Children only, but an admin chat also reaches every chat of its Space
-    /// (wait, archive). Interrupt and respond stay `Child`.
-    ChildOrAdmin,
     /// `archive_chat`: children, the workers in the caller's project scope, or
     /// (admin chats) any chat of the Space.
     ArchiveScope,
@@ -2954,7 +2963,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.contains("you can message chats you created and your parent chat"),
+            err.contains("you can reach chats you created"),
             "{err}"
         );
         let child = tools
@@ -3090,8 +3099,6 @@ mod tests {
         assert_eq!(read["returned"], 2);
         for (name, extra) in [
             ("get_chat", json!({})),
-            ("send_message", json!({ "text": "hi" })),
-            ("wait_for_turn", json!({ "timeout_secs": 1 })),
             ("interrupt_chat", json!({})),
         ] {
             let mut args = extra;
@@ -3102,13 +3109,17 @@ mod tests {
                 "{name}: {err}"
             );
         }
+        let sent = scoped.call("send_message", json!({ "chat": "chat-alpha-1", "text": "hi" })).await.unwrap();
+        assert_eq!(sent["chatId"], "chat-alpha-1");
+        let waited = scoped.call("wait_for_turn", json!({ "chat": "chat-alpha-1", "timeout_secs": 1 })).await.unwrap();
+        assert_eq!(waited["chatId"], "chat-alpha-1");
         // Without project reach the same read is refused.
         let plain = tools(Arc::new(World::default()), Some(BETA_TOKEN));
         let err = plain
             .call("read_chat", json!({ "chat": "chat-alpha-1" }))
             .await
             .unwrap_err();
-        assert!(err.contains("agents can only reach"), "{err}");
+        assert!(err.contains("you can reach"), "{err}");
     }
 
     #[tokio::test]
@@ -3251,7 +3262,7 @@ mod tests {
             .call("read_chat", json!({ "chat": "Alpha" }))
             .await
             .unwrap_err();
-        assert!(err.contains("agents can only reach"), "{err}");
+        assert!(err.contains("you can reach"), "{err}");
 
         // Lists show only what the token reaches.
         let listed = tools
