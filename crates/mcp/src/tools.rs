@@ -2031,6 +2031,7 @@ impl Tools {
                     return false;
                 }
                 reachable(origin, c, allow_self, admin_ok)
+                    || (reach == Reach::ArchiveScope && admin_reaches(origin, c))
                     || (!c.archived
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
                         && parent.as_deref() == Some(c.id.as_str()))
@@ -2272,7 +2273,7 @@ enum Reach {
 fn reachable(origin: &AgentOrigin, chat: &Chat, allow_self: bool, admin_ok: bool) -> bool {
     chat.parent_chat_id.as_deref() == Some(origin.chat_id.as_str())
         || (allow_self && chat.id == origin.chat_id)
-        || (admin_ok && admin_reaches(origin, chat))
+        || (admin_ok && !chat.archived && admin_reaches(origin, chat))
 }
 
 /// An admin chat (a live user grant, re-checked at every authenticate) reaches
@@ -3031,6 +3032,18 @@ mod tests {
         let world = Arc::new(World { beta_parent: Some("chat-alpha-1"), alpha_archived: true, ..World::default() });
         let error = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Done"})).await.unwrap_err();
         assert!(error.contains("no chat matches"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn admin_cannot_reach_archived_chat() {
+        let world = Arc::new(World { alpha_archived: true, ..World::default() });
+        let admin = tools(world, Some(ADMIN_TOKEN));
+        for name in ["get_chat", "read_chat", "send_message", "wait_for_turn"] {
+            let error = admin.call(name, json!({"chat":"chat-alpha-1", "text":"Hello", "timeout_secs":1})).await.unwrap_err();
+            assert!(error.contains("no chat matches") || error.contains("agents can only"), "{name}: {error}");
+        }
+        let restored = admin.call("archive_chat", json!({"chat":"chat-alpha-1", "archived":false})).await.unwrap();
+        assert_eq!(restored["archived"], false);
     }
 
     #[tokio::test]
