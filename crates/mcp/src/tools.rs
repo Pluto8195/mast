@@ -17,10 +17,9 @@
 //!   token's Space on the token's device, with a cwd inside the Space or the
 //!   caller's cwd, and a sandbox / approval mode never more permissive than
 //!   the caller's;
-//! - `send_message`, `interrupt_chat`, `respond_to_input`, `wait_for_turn`,
-//!   reach only Chats the caller created (`archive_chat` also the workers in
-//!   the caller's project scope, if finished or forced); `get_chat` and
-//!   `read_chat` also the caller itself; `list_chats` lists only those;
+//! - Communication reaches created chats and non-archived chats in the caller's
+//!   item subtree or project; messages also reach the parent and latest sender.
+//!   Interrupt and archive have separate restrictions;
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
 //!   `whoami` are unscoped.
@@ -2032,8 +2031,13 @@ impl Tools {
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
             if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
+                let extra = match reach {
+                    Reach::MessageScope => ", your parent, and the chat that last messaged you",
+                    Reach::ReadScope => ", and your own chat",
+                    _ => "",
+                };
                 return anyhow::anyhow!(
-                    "no chat matches {key:?}: you can reach chats you created, non-archived chats on your item subtree or in your project, your parent, and the chat that last messaged you"
+                    "no chat matches {key:?}: you can reach chats you created and non-archived chats on your item subtree or in your project{extra}"
                 );
             }
             anyhow::anyhow!(
@@ -2044,9 +2048,7 @@ impl Tools {
                 } else {
                     ""
                 },
-                if reach == Reach::CommunicationScope {
-                    ", and read the chats on items in their own project"
-                } else if reach == Reach::ArchiveScope {
+                if reach == Reach::ArchiveScope {
                     ", and archive the workers in their own project"
                 } else {
                     ""
@@ -2083,7 +2085,7 @@ impl Tools {
         format!(
             "{} {label}{admin}. Reply to it with the Mast `send_message` tool, chat {}.]\n\n{text}",
             mast_proto::RELAYED_MESSAGE_PREFIX,
-            short(origin_id)
+            origin_id
         )
     }
 
@@ -2250,12 +2252,12 @@ enum Reach {
     /// Those, or the caller itself (reads, sends). An admin chat also
     /// reaches every chat of its Space.
     SelfOrChild,
-    /// Those, the caller itself, or the caller's parent chat (`send_message`).
+    /// Children and non-archived chats in the caller's item or project scope.
     CommunicationScope,
+    /// Communication scope, the caller, its parent and its latest sender.
     MessageScope,
+    /// Communication scope and the caller itself.
     ReadScope,
-    /// Those, or any chat on an item inside the caller's project (read-only:
-    /// `read_chat` only, never a send).
     /// `archive_chat`: children, the workers in the caller's project scope, or
     /// (admin chats) any chat of the Space.
     ArchiveScope,
@@ -2400,6 +2402,7 @@ mod tests {
         /// The engine's finished-worker verdicts for the agent's archive scope.
         archive_info: Vec<(&'static str, Value)>,
         pending_questions: Option<Value>,
+        relay_message: Option<&'static str>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2489,6 +2492,10 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::WATCH_DOC_MESSAGES if self.relay_message.is_some() => stream(json!({ "reset": [
+                    { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
+                      "parts": [{ "kind": "text", "id": "t", "text": self.relay_message }] }
+                ]})),
                 methods::WATCH_DOC_MESSAGES if self.pending_questions.is_some() => stream(json!({ "reset": [
                     { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local", "status": "streaming",
                       "parts": [{ "kind": "input", "id": "i", "requestId": "r1", "questions": self.pending_questions, "resolved": false }] }
@@ -2999,6 +3006,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_can_reply_to_the_last_sender() {
+        let world = Arc::new(World {
+            relay_message: Some("[Message from Mast chat Alpha (chat-alp). Reply to it with the Mast `send_message` tool, chat chat-alp.]\n\nPlease review"),
+            ..World::default()
+        });
+        let result = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat": "chat-alpha-1", "text": "Done"})).await.unwrap();
+        assert_eq!(result["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
     async fn an_agent_may_message_its_parent_and_nobody_else_it_did_not_create() {
         let world = Arc::new(World {
             beta_parent: Some("chat-alpha-1"),
@@ -3082,10 +3099,10 @@ mod tests {
         );
     }
 
-    /// Chats on items inside the caller's project are readable, and only
-    /// readable: no send, wait, interrupt, or archive reaches them.
+    /// Chats on items inside the caller's project support communication,
+    /// while interrupt and archive retain their separate restrictions.
     #[tokio::test]
-    async fn read_chat_reaches_the_chats_in_the_callers_project_read_only() {
+    async fn communication_reaches_chats_in_the_callers_project() {
         let world = Arc::new(World {
             project_chats: vec!["chat-alpha-1"],
             ..World::default()
@@ -3177,6 +3194,17 @@ mod tests {
         );
         // An expired or revoked grant is gone from the next authenticate.
         assert!(plain.call("get_chat", json!({ "chat": "chat-alpha-1" })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn scoped_chat_input_can_be_answered() {
+        let world = Arc::new(World {
+            project_chats: vec!["chat-alpha-1"],
+            pending_questions: Some(json!([{ "id": "q", "header": "Approval", "question": "Continue?", "options": ["Yes", "No"], "multiSelect": false }])),
+            ..World::default()
+        });
+        let result = tools(world, Some(BETA_TOKEN)).call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"q", "labels":["Yes"]}]})).await.unwrap();
+        assert_eq!(result["chatId"], "chat-alpha-1");
     }
 
     #[tokio::test]

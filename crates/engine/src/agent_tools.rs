@@ -2016,8 +2016,7 @@ impl AgentToolsService {
     /// Chat and message) as the user's. Delivery comes first, so a failure
     /// leaves the request open; a replay of the same key never delivers twice.
     /// `chat_project_scope_chats`: the Chats on items inside the caller's
-    /// project (the nearest project at or above its item; the item itself
-    /// counts). Empty without a project. Read-only reach for `read_chat`.
+    /// project, or the caller's own item subtree when outside a project.
     fn project_scope_chats(&self, context: &CallContext) -> Value {
         let chat_ids: Vec<String> = context
             .current_item_id()

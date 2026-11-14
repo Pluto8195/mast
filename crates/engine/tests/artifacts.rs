@@ -2321,7 +2321,8 @@ async fn assert_request_link_targets(rig: &Rig, good: Value, bad: Value) {
         "request": "Review", "idempotencyKey": "links-bad", "links": [{"label": "Bad reference", "target": bad}]
     })).await.unwrap_err();
     assert!(
-        error.contains("Bad reference") && error.contains("artifact, file, diff, pr, chat, url"),
+        error.contains("Bad reference") && error.contains("artifact, file, diff, pr, chat, url")
+            && error.contains(r#"{"label":"Changes","target":{"type":"diff","branch":"feature"}}"#),
         "{error}"
     );
 }
@@ -2594,11 +2595,14 @@ async fn sheet_republication_updates_the_same_open_card() {
     let cards = || outline.snapshot(SPACE).user_action_requests.into_iter().filter(|r| r.is_open() && r.dedupe_key.as_deref() == Some(format!("artsheet:{id}").as_str())).collect::<Vec<_>>();
     let card_id = cards()[0].id.clone();
     std::fs::write(&path, source.replace("Proceed?", "Proceed now?")).unwrap();
-    publish(&rig, &rig.token, args("sheet-republish-2")).await;
+    rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"assignChatToWorkItem", "chatId":OTHER_CHAT, "workItemId":rig.item, "operationId":"assign-sheet-publisher"})).await.unwrap();
+    publish(&rig, &rig.other_token, args("sheet-republish-2")).await;
     sync.reconcile(id);
     let cards = cards();
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].id, card_id);
+    assert_eq!(cards[0].chat_id, OTHER_CHAT);
+    assert_eq!(artifact(&rig, id).current_owner_chat_id(), Some(OTHER_CHAT));
     assert!(cards[0].info.as_deref().unwrap().contains("Revision 2"));
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":card_id,
         "note":"I'll return to this", "operationId":"resolve-sheet-card"})).await.unwrap();
