@@ -34,3 +34,7 @@ For planners reading `artifact_get_decisions`: `outcome: decided` with
 as the note; follow that answer instead of the recommendation. `outcome: rejected` means the
 optional change in that row will not be built; its note is optional context. Preserve row IDs
 and apply these decisions when revising the plan.
+
+An open top-level row may include `options`, an array of 2–3 objects with unique, nonempty `id` and `label` strings and optional `detail`. Set `recommendedOption` to one of those IDs and provide the explanatory `recommendation` text. Option IDs are stable within the row across revisions. Rows without options retain their existing behavior.
+
+An `outcome: option` decision includes `optionId` and `label`: build the chosen option. The label is captured at submission and remains available across revisions.

@@ -2550,6 +2550,22 @@ async fn sheet_decision_batch_rejects_invalid_rows_without_partial_write() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sheet_option_decision_round_trips() {
+    let rig = rig().await;
+    let path = rig.worktree.join("options.json");
+    std::fs::write(&path, r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}],"steps":[]}]}"#).unwrap();
+    let published = publish(&rig, &rig.token, json!({"path":path,"title":"Sheet","kind":"decision-sheet","idempotencyKey":"option-sheet"})).await;
+    let id = published["artifactId"].as_str().unwrap();
+    let decision = |label| json!({"artifactId":id,"revision":1,"decisions":[{"rowId":"D-2","outcome":"option","optionId":"night","label":label}]});
+    assert!(rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, decision("Wrong")).await.is_err());
+    rig.client.call(methods::ARTIFACT_SUBMIT_SHEET_DECISIONS, decision("Night")).await.unwrap();
+    let result = tool(&rig, &rig.token, "artifact_get_decisions", json!({"artifactId":id})).await.unwrap();
+    assert_eq!(result["decisions"][0]["optionId"], "night");
+    assert_eq!(result["decisions"][0]["label"], "Night");
+    assert_eq!(result["decisions"][0]["outcome"], "option");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sheet_has_one_required_action_that_tracks_open_rows() {
     let rig = rig().await;
     let path = rig.worktree.join("sheet.json");

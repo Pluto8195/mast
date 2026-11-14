@@ -450,6 +450,16 @@ fn sheet_drafts_stage_undo_and_send_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sheet_option_stages_with_label(cx: &mut TestAppContext) {
+    let _dir = init_ui(cx);
+    let page = r#"{"kind":"decision-sheet","title":"Sheet","flows":[{"id":"D-2","title":"Flow","status":{"state":"open"},"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}],"steps":[]}]}"#;
+    let (tab, _calls, _probe, shown, vcx) = open_page(cx, ArtifactKind::DecisionSheet, Vec::new(), page);
+    assert!(shown.borrow().last().unwrap().1.contains("data-sheet-option"));
+    frame(&tab, vcx, json!({"t":"sheet-stage","id":"D-2","outcome":"option","optionId":"night","note":""}));
+    vcx.update(|_, cx| { let d = &crate::settings::current(cx).artifact_decision_drafts[&id(1)].decisions[0]; assert_eq!(d.label.as_deref(), Some("Night")); assert_eq!(d.option_id.as_deref(), Some("night")); });
+}
+
+#[gpui::test]
 fn sheet_drafts_survive_reopening(cx: &mut TestAppContext) {
     let _dir = init_ui(cx);
     {

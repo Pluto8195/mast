@@ -628,7 +628,21 @@
             "date": null
           }
         }
-      ]
+      ],
+      "options": [
+        {
+          "id": "immediate",
+          "label": "Clear after confirmation"
+        },
+        {
+          "id": "scheduled",
+          "label": "Clear at the end of the day",
+          "detail": "Keep the schedule until the day ends."
+        }
+      ],
+      "recommendedOption": "immediate",
+      "question": "How should a schedule be cleared?",
+      "recommendation": "Clear immediately after confirmation."
     },
     {
       "id": "flow-3",

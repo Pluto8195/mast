@@ -16,6 +16,10 @@ Status: decided
 
 Status: open
 
+Decision: How should a schedule be cleared?
+
+Recommendation: Clear immediately after confirmation.
+
 ## flow-3: Save on a stale version
 
 Status: decided

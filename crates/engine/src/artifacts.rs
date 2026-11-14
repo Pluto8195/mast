@@ -1760,6 +1760,13 @@ impl ArtifactsService {
                     decision.row_id
                 )));
             }
+            if decision.outcome == mast_proto::decision_sheet::DecisionOutcome::Option {
+                if decision.override_recommendation || !row.options.iter().any(|option| Some(option.id.as_str()) == decision.option_id.as_deref() && Some(option.label.as_str()) == decision.label.as_deref()) {
+                    return Err(ArtifactError::invalid("invalid option selection"));
+                }
+            } else if decision.option_id.is_some() || decision.label.is_some() {
+                return Err(ArtifactError::invalid("option fields require an option outcome"));
+            }
             if decision.outcome == mast_proto::decision_sheet::DecisionOutcome::Rejected && !row.optional {
                 return Err(ArtifactError::invalid("row is not optional"));
             }
@@ -1783,6 +1790,8 @@ impl ArtifactsService {
             .map(|draft| SheetDecision {
                 row_id: draft.row_id.clone(),
                 outcome: draft.outcome,
+                option_id: draft.option_id.clone(),
+                label: draft.label.clone(),
                 override_recommendation: draft.override_recommendation,
                 note: draft
                     .note

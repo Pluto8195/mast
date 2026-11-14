@@ -40,6 +40,10 @@ pub struct Model {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
     pub fields: Vec<Field>,
 }
 #[derive(Debug, Deserialize)]
@@ -69,6 +73,10 @@ pub struct Endpoint {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +114,10 @@ pub struct RuleRow {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +131,10 @@ pub struct Validation {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,6 +147,10 @@ pub struct Permission {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +163,10 @@ pub struct Flow {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +199,17 @@ pub struct UiState {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<DecisionOption>>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionOption {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +225,10 @@ pub struct OutOfScope {
 pub struct SheetDecision {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub override_recommendation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +243,7 @@ pub struct SheetDecision {
 pub enum DecisionOutcome {
     Decided,
     Rejected,
+    Option,
 }
 
 /// A decision awaiting submission from the local draft.
@@ -212,6 +252,10 @@ pub enum DecisionOutcome {
 pub struct SheetDecisionDraft {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub override_recommendation: bool,
     #[serde(default)]
@@ -264,9 +308,11 @@ pub fn decision_batch_message(title: &str, decisions: &[SheetDecision]) -> Strin
             if decision.override_recommendation {
                 return format!("{} answered: {}", decision.row_id, decision.note.as_deref().unwrap_or("").trim());
             }
+            if decision.outcome == DecisionOutcome::Option { return format!("{} chose: {}", decision.row_id, decision.label.as_deref().unwrap_or("")); }
             let outcome = match decision.outcome {
                 DecisionOutcome::Decided => "accepted",
                 DecisionOutcome::Rejected => "rejected",
+                DecisionOutcome::Option => "chose",
             };
             let note = decision
                 .note
@@ -291,6 +337,9 @@ pub struct DecisionRow<'a> {
     pub recommendation: Option<&'a str>,
     pub question: Option<&'a str>,
     pub optional: bool,
+    pub options: &'a [DecisionOption],
+    pub has_options: bool,
+    pub recommended_option: Option<&'a str>,
 }
 
 /// Render the sheet and its recorded answers for sharing as Markdown.
@@ -301,7 +350,7 @@ pub fn markdown(sheet: &DecisionSheet, decisions: &[SheetDecision]) -> String {
         let decision = decisions.iter().rev().find(|d| d.row_id == row.id);
         let state = decision
             .map(|d| match d.outcome {
-                DecisionOutcome::Decided => "decided",
+                DecisionOutcome::Decided | DecisionOutcome::Option => "decided",
                 DecisionOutcome::Rejected => "rejected",
             })
             .unwrap_or(&row.status.state);
@@ -312,6 +361,7 @@ pub fn markdown(sheet: &DecisionSheet, decisions: &[SheetDecision]) -> String {
         if let Some(recommendation) = row.recommendation {
             let _ = writeln!(out, "\nRecommendation: {recommendation}");
         }
+        if let Some(label) = decision.and_then(|d| d.label.as_deref()) { let _ = writeln!(out, "\nChosen: {label}"); }
         if let Some(note) = decision.and_then(|d| d.note.as_deref()) {
             let _ = writeln!(out, "\nAnswer: {note}");
         }
@@ -329,11 +379,11 @@ impl DecisionSheet {
                 .find(|decision| decision.row_id == id)
             {
                 status.state = match decision.outcome {
-                    DecisionOutcome::Decided => "decided",
+                    DecisionOutcome::Decided | DecisionOutcome::Option => "decided",
                     DecisionOutcome::Rejected => "rejected",
                 }
                 .into();
-                status.date = chrono::DateTime::from_timestamp_millis(decision.at)
+                status.date = (decision.at > 0).then(|| chrono::DateTime::from_timestamp_millis(decision.at)).flatten()
                     .map(|at| at.format("%Y-%m-%d").to_string());
             }
         }
@@ -374,6 +424,9 @@ impl DecisionSheet {
                     recommendation: $row.recommendation.as_deref(),
                     question: $row.question.as_deref(),
                     optional: $row.optional,
+                    options: $row.options.as_deref().unwrap_or_default(),
+                    has_options: $row.options.is_some(),
+                    recommended_option: $row.recommended_option.as_deref(),
                 });
             };
         }
@@ -410,6 +463,22 @@ impl DecisionSheet {
         }
         if sheet.title.trim().is_empty() {
             return Err("title must not be empty".into());
+        }
+        for decision in sheet.decision_rows() {
+            if decision.has_options {
+                if decision.status.state != "open" || !(2..=3).contains(&decision.options.len()) {
+                    return Err(format!("options for {:?} require an open row and 2–3 entries", decision.id));
+                }
+                let mut option_ids = HashSet::new();
+                if decision.options.iter().any(|o| o.id.trim().is_empty() || o.label.trim().is_empty() || !option_ids.insert(&o.id)) {
+                    return Err(format!("invalid or duplicate option for {:?}", decision.id));
+                }
+                if !decision.recommended_option.is_some_and(|id| option_ids.contains(&id.to_owned())) || decision.recommendation.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                    return Err(format!("recommendation and valid recommendedOption required for {:?}", decision.id));
+                }
+            } else if decision.recommended_option.is_some() {
+                return Err(format!("recommendedOption requires options for {:?}", decision.id));
+            }
         }
         let mut ids = HashSet::new();
         fn row(ids: &mut HashSet<String>, id: &str, status: &Status) -> Result<(), String> {
@@ -513,7 +582,7 @@ mod tests {
     use super::*;
     #[test]
     fn answer_override_is_distinct_from_an_acceptance_note() {
-        let decision = SheetDecision { row_id: "D-3".into(), outcome: DecisionOutcome::Decided,
+        let decision = SheetDecision { row_id: "D-3".into(), outcome: DecisionOutcome::Decided, option_id: None, label: None,
             override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 1 };
         assert_eq!(decision_batch_message("T", &[decision]), "Decisions for T: D-3 answered: Use UTC");
     }
@@ -537,7 +606,7 @@ mod tests {
         let decisions = vec![
             SheetDecision {
                 row_id: "D-2".into(),
-                outcome: DecisionOutcome::Decided,
+                outcome: DecisionOutcome::Decided, option_id: None, label: None,
                 override_recommendation: false,
                 note: None,
                 at: 20,
@@ -545,7 +614,7 @@ mod tests {
             },
             SheetDecision {
                 row_id: "D-4".into(),
-                outcome: DecisionOutcome::Rejected,
+                outcome: DecisionOutcome::Rejected, option_id: None, label: None,
                 override_recommendation: false,
                 note: Some("too slow".into()),
                 at: 20,
@@ -567,10 +636,28 @@ mod tests {
     }
 
     #[test]
+    fn validates_approach_options() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"f","title":"Flow","status":{"state":"open"},"steps":[],"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}]}]}"#;
+        assert!(DecisionSheet::parse(source).is_ok());
+        for invalid in [source.replace("\"id\":\"night\"", "\"id\":\"save\""), source.replace("\"recommendedOption\":\"save\"", "\"recommendedOption\":\"missing\""), source.replace(",{\"id\":\"night\",\"label\":\"Night\"}", "")].iter() {
+            assert!(DecisionSheet::parse(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn missing_decision_date_is_not_rendered_as_epoch() {
+        let mut sheet = DecisionSheet::parse(r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"f","title":"Flow","status":{"state":"open"},"steps":[]}]}"#).unwrap();
+        let decision = SheetDecision { row_id: "f".into(), outcome: DecisionOutcome::Decided, option_id: None, label: None, override_recommendation: false, note: None, at: 0, revision: 1 };
+        sheet.apply_decisions(&[decision]);
+        assert!(sheet.flows[0].status.date.is_none());
+        assert!(!crate::decision_sheet_render::render(&sheet).contains("1970-01-01"));
+    }
+
+    #[test]
     fn markdown_shows_recorded_answers() {
         let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
         let row_id = sheet.decision_rows()[0].id.to_owned();
-        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
+        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, option_id: None, label: None, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
         let text = markdown(&sheet, &[decision]);
         assert!(text.contains("Status: decided"));
         assert!(text.contains("Answer: Use UTC"));
