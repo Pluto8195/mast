@@ -40,6 +40,10 @@ pub struct Model {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
     pub fields: Vec<Field>,
 }
 #[derive(Debug, Deserialize)]
@@ -69,6 +73,10 @@ pub struct Endpoint {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +114,10 @@ pub struct RuleRow {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +131,10 @@ pub struct Validation {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,6 +147,10 @@ pub struct Permission {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +163,10 @@ pub struct Flow {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +199,17 @@ pub struct UiState {
     pub status: Status,
     pub recommendation: Option<String>,
     pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<DecisionOption>,
+    #[serde(default, rename = "recommendedOption")]
+    pub recommended_option: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionOption {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -291,6 +326,8 @@ pub struct DecisionRow<'a> {
     pub recommendation: Option<&'a str>,
     pub question: Option<&'a str>,
     pub optional: bool,
+    pub options: &'a [DecisionOption],
+    pub recommended_option: Option<&'a str>,
 }
 
 /// Render the sheet and its recorded answers for sharing as Markdown.
@@ -374,6 +411,8 @@ impl DecisionSheet {
                     recommendation: $row.recommendation.as_deref(),
                     question: $row.question.as_deref(),
                     optional: $row.optional,
+                    options: &$row.options,
+                    recommended_option: $row.recommended_option.as_deref(),
                 });
             };
         }
@@ -410,6 +449,22 @@ impl DecisionSheet {
         }
         if sheet.title.trim().is_empty() {
             return Err("title must not be empty".into());
+        }
+        for decision in sheet.decision_rows() {
+            if !decision.options.is_empty() {
+                if decision.status.state != "open" || !(2..=3).contains(&decision.options.len()) {
+                    return Err(format!("options for {:?} require an open row and 2–3 entries", decision.id));
+                }
+                let mut option_ids = HashSet::new();
+                if decision.options.iter().any(|o| o.id.trim().is_empty() || o.label.trim().is_empty() || !option_ids.insert(&o.id)) {
+                    return Err(format!("invalid or duplicate option for {:?}", decision.id));
+                }
+                if !decision.recommended_option.is_some_and(|id| option_ids.contains(&id.to_owned())) || decision.recommendation.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                    return Err(format!("recommendation and valid recommendedOption required for {:?}", decision.id));
+                }
+            } else if decision.recommended_option.is_some() {
+                return Err(format!("recommendedOption requires options for {:?}", decision.id));
+            }
         }
         let mut ids = HashSet::new();
         fn row(ids: &mut HashSet<String>, id: &str, status: &Status) -> Result<(), String> {

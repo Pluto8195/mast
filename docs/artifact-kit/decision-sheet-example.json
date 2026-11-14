@@ -628,7 +628,21 @@
             "date": null
           }
         }
-      ]
+      ],
+      "options": [
+        {
+          "id": "on-save",
+          "label": "Recalculate on save"
+        },
+        {
+          "id": "nightly",
+          "label": "Recalculate nightly",
+          "detail": "Use the nightly job."
+        }
+      ],
+      "recommendedOption": "on-save",
+      "question": "When should recalculation run?",
+      "recommendation": "Recalculate on save."
     },
     {
       "id": "flow-3",
