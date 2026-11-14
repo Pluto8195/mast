@@ -41,7 +41,7 @@ pub struct Model {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
     pub fields: Vec<Field>,
@@ -74,7 +74,7 @@ pub struct Endpoint {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -115,7 +115,7 @@ pub struct RuleRow {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -132,7 +132,7 @@ pub struct Validation {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -148,7 +148,7 @@ pub struct Permission {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -164,7 +164,7 @@ pub struct Flow {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -200,7 +200,7 @@ pub struct UiState {
     pub recommendation: Option<String>,
     pub question: Option<String>,
     #[serde(default)]
-    pub options: Vec<DecisionOption>,
+    pub options: Option<Vec<DecisionOption>>,
     #[serde(default, rename = "recommendedOption")]
     pub recommended_option: Option<String>,
 }
@@ -338,6 +338,7 @@ pub struct DecisionRow<'a> {
     pub question: Option<&'a str>,
     pub optional: bool,
     pub options: &'a [DecisionOption],
+    pub has_options: bool,
     pub recommended_option: Option<&'a str>,
 }
 
@@ -423,7 +424,8 @@ impl DecisionSheet {
                     recommendation: $row.recommendation.as_deref(),
                     question: $row.question.as_deref(),
                     optional: $row.optional,
-                    options: &$row.options,
+                    options: $row.options.as_deref().unwrap_or_default(),
+                    has_options: $row.options.is_some(),
                     recommended_option: $row.recommended_option.as_deref(),
                 });
             };
@@ -463,7 +465,7 @@ impl DecisionSheet {
             return Err("title must not be empty".into());
         }
         for decision in sheet.decision_rows() {
-            if !decision.options.is_empty() {
+            if decision.has_options {
                 if decision.status.state != "open" || !(2..=3).contains(&decision.options.len()) {
                     return Err(format!("options for {:?} require an open row and 2–3 entries", decision.id));
                 }
@@ -631,6 +633,15 @@ mod tests {
                 .unwrap(),
             decisions[0]
         );
+    }
+
+    #[test]
+    fn validates_approach_options() {
+        let source = r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"f","title":"Flow","status":{"state":"open"},"steps":[],"recommendation":"Save","recommendedOption":"save","options":[{"id":"save","label":"Save"},{"id":"night","label":"Night"}]}]}"#;
+        assert!(DecisionSheet::parse(source).is_ok());
+        for invalid in [source.replace("\"id\":\"night\"", "\"id\":\"save\""), source.replace("\"recommendedOption\":\"save\"", "\"recommendedOption\":\"missing\""), source.replace(",{\"id\":\"night\",\"label\":\"Night\"}", "")].iter() {
+            assert!(DecisionSheet::parse(invalid).is_err());
+        }
     }
 
     #[test]

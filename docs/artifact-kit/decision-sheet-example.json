@@ -631,18 +631,18 @@
       ],
       "options": [
         {
-          "id": "on-save",
-          "label": "Recalculate on save"
+          "id": "immediate",
+          "label": "Clear after confirmation"
         },
         {
-          "id": "nightly",
-          "label": "Recalculate nightly",
-          "detail": "Use the nightly job."
+          "id": "scheduled",
+          "label": "Clear at the end of the day",
+          "detail": "Keep the schedule until the day ends."
         }
       ],
-      "recommendedOption": "on-save",
-      "question": "When should recalculation run?",
-      "recommendation": "Recalculate on save."
+      "recommendedOption": "immediate",
+      "question": "How should a schedule be cleared?",
+      "recommendation": "Clear immediately after confirmation."
     },
     {
       "id": "flow-3",

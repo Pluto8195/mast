@@ -21,6 +21,7 @@ const CSS: &str = r#"
 .mk-sheet-actions[hidden], .mk-sheet-note[hidden] { display:none; }
 .mk-sheet-actions button, .mk-sheet-bar button { font:inherit; font-size:13px; font-weight:600; border:0; border-radius:14px; padding:4px 14px; cursor:pointer; color:var(--foreground); }
 .mk-sheet-actions [data-sheet-accept], .mk-sheet-actions [data-sheet-option], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
+.mk-option-detail { display:block; font-weight:400; }
 .mk-sheet-actions [data-sheet-reject], .mk-sheet-actions [data-sheet-answer] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--muted-foreground); }
 .mk-sheet-actions [data-sheet-change], .mk-sheet-actions [data-sheet-undo], .mk-sheet-actions [data-sheet-note-toggle], .mk-sheet-bar [data-sheet-discard] { background:transparent; color:var(--muted-foreground); padding:4px 3px; }
 .mk-sheet .mk-sheet-note { grid-column:1 / -1; color:var(--muted-foreground); font-size:12px; }
@@ -107,3 +108,15 @@ const SCRIPT: &str = r#"(() => {
   window.addEventListener('message', e => { if (!e.data) return; if (e.data.mastSheetStageRejected) { const {id,reason} = e.data.mastSheetStageRejected; drafts.delete(id); errors.set(id,reason); setBusy(false); update(); } if (e.data.mastSheetEnableSend) setBusy(false); if (e.data.mastSheetSent) { e.data.mastSheetSent.forEach(d => {sent.set(d.rowId,d); drafts.delete(d.rowId);}); setBusy(false); update(); } });
   update();
 })();"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decided_option_is_available_to_the_frame() {
+        let sent = SheetDecision { row_id: "D-2".into(), outcome: mast_proto::decision_sheet::DecisionOutcome::Option, option_id: Some("night".into()), label: Some("Night".into()), override_recommendation: false, note: None, at: 1, revision: 1 };
+        let html = with_state("<div data-sheet-row=\"D-2\"></div>", None, &[sent]);
+        assert!(html.contains("\"optionId\":\"night\""));
+        assert!(html.contains("Chosen: ${saved.label}"));
+    }
+}
