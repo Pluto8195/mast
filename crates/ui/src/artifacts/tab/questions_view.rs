@@ -370,9 +370,9 @@ impl ArtifactTab {
         let Some(artifact) = self.artifact(cx) else { return; };
         let drafts = self.question_drafts(&artifact, cx);
         if drafts.is_empty() || self.questions.busy { return; }
-        let chat = artifact.chat_id.clone().filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
+        let chat = artifact.current_owner_chat_id().map(str::to_owned).filter(|id| self.state.read(cx).chats.iter().any(|row| row.id == *id && !row.archived));
         let Some(chat) = chat else {
-            self.notice = Some("The origin chat is unavailable. Answers remain staged.".into());
+            self.notice = Some("The current owner chat is unavailable. Answers remain staged.".into());
             cx.notify();
             return;
         };

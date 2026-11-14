@@ -356,6 +356,12 @@ impl ArtifactView {
         format!("{ARTIFACT_URL_SCHEME}{}", self.id)
     }
 
+    /// The chat responsible for the latest published revision.
+    pub fn current_owner_chat_id(&self) -> Option<&str> {
+        self.revisions.iter().find_map(|revision| revision.by.chat_id.as_deref())
+            .or(self.chat_id.as_deref())
+    }
+
     /// The newest revision.
     pub fn current(&self) -> Option<&ArtifactRevision> {
         self.revision(self.current_revision)
