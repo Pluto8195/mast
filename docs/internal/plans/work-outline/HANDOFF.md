@@ -28,6 +28,11 @@ Prepared 2026-10-14, last updated 2026-11-06 (evening). Read this first in a new
 
 ## Built and installed
 
+- **Release 90: review follow-ups** (2026-11-14; touched crates from ded3ec8f9: all passed; UI 2639/0): Claude
+  limit-error dedupe resets at turn boundaries; admin reach skips archived chats except `archive_chat` (unarchive);
+  decision-sheet tables wrap inside their cards at narrow widths (verify visually after restart).
+  Backup: `~/zeron-dev-app-backups/mast-release-89`.
+
 - **Release 89: coordinator reach + approach options** (2026-11-14; tests for touched crates from fc0b007b6: nextest
   2545/2547, only the known `peer::actual_webrtc_pair_streams…` and `preview::leak remote_preview_churn`; UI 2639/0).
   - Coordinator reach: send_message, read_chat and wait_for_turn reach non-archived chats in the caller's item subtree
@@ -1184,7 +1189,7 @@ The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners an
 
 ## In flight (snapshot 2026-11-12 evening; coordinator 9fd580ac)
 
-- **Installed: release 89** (built overnight 11-14 while Mikey was away; he still needs to restart).
+- **Installed: release 90** (89 and 90 built overnight 11-14 while Mikey was away; he still needs to restart).
 - **Next:** approval rule proposal for Codex cargo test in worktrees (ec30a2df); three proposed Space-root
   instructions (talk rules, no polling finished sessions, shell/CI habits) await Mikey.
 - **Terra pattern:** ends turns early when a design choice or the finish line is vague; workflow pack moved to Sonnet
