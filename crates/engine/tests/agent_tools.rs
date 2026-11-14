@@ -3123,7 +3123,7 @@ async fn project_scope_reaches_other_chats_requests_and_nothing_wider() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chat_without_a_project_keeps_its_own_subtree_reach() {
+async fn chat_scope_without_a_project_includes_descendants_and_excludes_siblings() {
     let rig = rig().await;
     let root = create_item(&rig, "np-root", "Plain", None).await;
     let leaf = create_item(&rig, "np-leaf", "Leaf", Some(&root)).await;
