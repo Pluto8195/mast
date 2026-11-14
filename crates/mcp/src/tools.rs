@@ -172,7 +172,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads chats you created, yourself, and non-archived chats on items in your item subtree or project.",
+            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line. The result is capped at about 48 KB of text (24 KB per message, keeping each message's tail): when `truncated` is true, `olderRemaining` / `nextOffset` page further back (pass `offset: nextOffset`) and `textOmittedBytes` on a message says how much of its start was cut. Reads chats you created and non-archived chats on items in your item subtree or project.",
             input_schema: chat_key_schema(json!({
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
                 "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
@@ -2023,6 +2023,9 @@ impl Tools {
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
+                if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) && c.id == origin.chat_id {
+                    return false;
+                }
                 reachable(origin, c, allow_self, admin_ok)
                     || parent.as_deref() == Some(c.id.as_str())
                     || last_sender.as_deref() == Some(c.id.as_str())
@@ -2033,7 +2036,7 @@ impl Tools {
             if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
                 let extra = match reach {
                     Reach::MessageScope => ", your parent, and the chat that last messaged you",
-                    Reach::ReadScope => ", and your own chat",
+                    Reach::ReadScope => "",
                     _ => "",
                 };
                 return anyhow::anyhow!(
@@ -2962,7 +2965,7 @@ mod tests {
             .call("send_message", json!({ "chat": "beta", "text": "loop" }))
             .await
             .unwrap_err();
-        assert!(err.contains("own chat"), "{err}");
+        assert!(err.contains("no chat matches"), "{err}");
 
         // An agent reaches only chats it created.
         let err = tools
@@ -3255,7 +3258,7 @@ mod tests {
         // someone else's chat, beta is the caller, child is its own child.
         let matrix: [(&str, Value, [bool; 3]); 7] = [
             ("get_chat", json!({}), [false, true, true]),
-            ("read_chat", json!({}), [false, true, true]),
+            ("read_chat", json!({}), [false, false, true]),
             (
                 "wait_for_turn",
                 json!({ "timeout_secs": 1 }),
