@@ -1914,7 +1914,7 @@ impl Tools {
         origin: Option<&AgentOrigin>,
         args: RespondArgs,
     ) -> anyhow::Result<Value> {
-        let chat = self.reach_chat(origin, &args.chat, Reach::CommunicationScope).await?;
+        let chat = self.reach_chat(origin, &args.chat, Reach::Child).await?;
         let entries = self.zeron.transcript(&chat.id).await?;
         let rendered = render_entries(&entries, RenderOptions::default());
         let pending = last_pending_input(&rendered)
@@ -3197,14 +3197,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_chat_input_can_be_answered() {
+    async fn sibling_approval_cannot_be_answered() {
         let world = Arc::new(World {
             project_chats: vec!["chat-alpha-1"],
-            pending_questions: Some(json!([{ "id": "q", "header": "Approval", "question": "Continue?", "options": ["Yes", "No"], "multiSelect": false }])),
+            pending_questions: Some(json!([{ "id": "q", "header": "Approve command", "question": "Continue?", "options": ["Yes", "No"], "multiSelect": false }])),
             ..World::default()
         });
-        let result = tools(world, Some(BETA_TOKEN)).call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"q", "labels":["Yes"]}]})).await.unwrap();
-        assert_eq!(result["chatId"], "chat-alpha-1");
+        let error = tools(world.clone(), Some(BETA_TOKEN)).call("respond_to_input", json!({"chat":"chat-alpha-1", "answers":[{"question_id":"q", "labels":["Yes"]}]})).await.unwrap_err();
+        assert!(error.contains("agents can only reach"), "{error}");
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
     }
 
     #[tokio::test]
