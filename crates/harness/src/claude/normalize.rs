@@ -288,6 +288,7 @@ impl Normalizer {
 
     /// Preserve a buffered assistant error when the process exits without a result.
     pub(crate) fn take_pending_limit_error(&mut self) -> Option<AgentEvent> {
+        self.emitted_limit_error = false;
         self.pending_limit_error.take()
     }
 
@@ -360,6 +361,7 @@ impl Normalizer {
                     return Vec::new();
                 }
                 self.saw_init = true;
+                self.emitted_limit_error = false;
                 self.session_id = Some(f.session_id.clone());
                 vec![AgentEvent::SessionStarted {
                     harness: HarnessId::ClaudeCode,
@@ -860,6 +862,18 @@ mod tests {
         let frame = crate::claude::wire::parse_frame(r#"{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your weekly usage limit"}]}}"#).unwrap();
         normalizer.normalize(frame, false);
         assert!(matches!(normalizer.take_pending_limit_error(), Some(AgentEvent::Error { code: Some(code), .. }) if code == "usage_weekly"));
+    }
+
+    #[test]
+    fn rejected_limits_without_results_emit_for_each_turn() {
+        let mut normalizer = Normalizer::new();
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            let frame = crate::claude::wire::parse_frame(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#).unwrap();
+            events.extend(normalizer.normalize(frame, false));
+            events.extend(normalizer.take_pending_limit_error());
+        }
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::Error { .. })).count(), 2);
     }
 
     #[test]
