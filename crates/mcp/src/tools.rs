@@ -1757,6 +1757,17 @@ impl Tools {
                 short(&chat.id)
             );
         }
+        if let Some(origin) = origin
+            && chat.parent_chat_id.as_deref() != Some(origin.chat_id.as_str())
+        {
+            let caller = self.zeron.chats().await?.into_iter().find(|c| c.id == origin.chat_id)
+                .ok_or_else(|| anyhow::anyhow!("this agent's chat no longer exists"))?;
+            let caller_sandbox = caller.config.as_ref().map(|c| c.sandbox).unwrap_or(SandboxLevel::WorkspaceWrite);
+            let target_sandbox = chat.config.as_ref().map(|c| c.sandbox).unwrap_or(SandboxLevel::WorkspaceWrite);
+            if sandbox_rank(target_sandbox) > sandbox_rank(caller_sandbox) {
+                anyhow::bail!("target chat sandbox {} is more permissive than your sandbox {}; messaging it is refused", sandbox_name(target_sandbox), sandbox_name(caller_sandbox));
+            }
+        }
         let caller_parent = match origin {
             Some(origin) => self
                 .zeron
@@ -3381,6 +3392,14 @@ mod tests {
             assert_eq!(create["spaceId"], "space-1");
             assert_eq!(create["parentChatId"], "chat-beta-2");
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_worker_cannot_message_wider_sibling() {
+        let world = Arc::new(World { beta_sandbox: Some("read-only"), project_chats: vec!["chat-alpha-1"], ..World::default() });
+        let error = tools(world.clone(), Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Run a command"})).await.unwrap_err();
+        assert!(error.contains("more permissive"), "{error}");
+        assert!(world.writes_of(methods::QUEUE_COMMAND).is_empty());
     }
 
     #[tokio::test]
