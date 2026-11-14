@@ -20,8 +20,11 @@ const CSS: &str = r#"
 .mk-sheet-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
 .mk-sheet-actions[hidden], .mk-sheet-note[hidden] { display:none; }
 .mk-sheet-actions button, .mk-sheet-bar button { font:inherit; font-size:13px; font-weight:600; border:0; border-radius:14px; padding:4px 14px; cursor:pointer; color:var(--foreground); }
-.mk-sheet-actions [data-sheet-accept], .mk-sheet-actions [data-sheet-option], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
-.mk-option-detail { display:block; font-weight:400; }
+.mk-sheet-actions [data-sheet-accept], .mk-sheet-actions [data-sheet-option][aria-pressed="true"], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
+.mk-sheet-options { display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; width:100%; }
+.mk-sheet-actions [data-sheet-option] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--foreground); border-radius:10px; padding:8px 14px; text-align:left; }
+.mk-option-detail { display:block; font-weight:400; color:var(--muted-foreground); }
+.mk-option-recommended { color:var(--muted-foreground); font-weight:400; }
 .mk-sheet-actions [data-sheet-reject], .mk-sheet-actions [data-sheet-answer] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--muted-foreground); }
 .mk-sheet-actions [data-sheet-change], .mk-sheet-actions [data-sheet-undo], .mk-sheet-actions [data-sheet-note-toggle], .mk-sheet-bar [data-sheet-discard] { background:transparent; color:var(--muted-foreground); padding:4px 3px; }
 .mk-sheet .mk-sheet-note { grid-column:1 / -1; color:var(--muted-foreground); font-size:12px; }
@@ -73,7 +76,7 @@ const SCRIPT: &str = r#"(() => {
         chip.textContent = result ? `${result.outcome === 'rejected' ? "Won't do" : result.outcome === 'option' ? `Chose: ${result.label}` : result.overrideRecommendation ? 'Answered' : 'Accepted'}${draft && !saved ? ' · not sent' : ''}` : 'Open';
       }
       const accept = controls.querySelector('[data-sheet-accept]'); if (accept) accept.hidden = !!draft && !editing;
-      controls.querySelectorAll('[data-sheet-option]').forEach(button => button.hidden = !!draft && !editing);
+      controls.querySelectorAll('[data-sheet-option]').forEach(button => { button.hidden = !!draft && draft.outcome !== 'option' && !editing; button.setAttribute('aria-pressed', String(!!draft && draft.outcome === 'option' && draft.optionId === button.dataset.sheetOption)); });
       const reject = controls.querySelector('[data-sheet-reject]'); if (reject) reject.hidden = !!draft && !editing;
       controls.querySelector('[data-sheet-answer]').hidden = !!draft && !editing;
       controls.querySelector('[data-sheet-answer]').textContent = answering.has(id) ? 'Stage answer' : 'Answer differently';

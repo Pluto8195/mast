@@ -90,7 +90,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     esc(row.id), esc(row.id), row_label(row.id), esc(row.question.unwrap_or(row.title))
                 )
                 .unwrap();
-                if let Some(recommendation) = row.recommendation {
+                if let Some(recommendation) = row.recommendation.filter(|_| row.options.is_empty()) {
                     write!(
                         out,
                         "<div class=\"mk-recommendation\"><b>Recommendation:</b> {}</div>",
@@ -101,9 +101,11 @@ pub fn render(sheet: &DecisionSheet) -> String {
                 if state == "open" {
                     out.push_str("<div class=\"mk-sheet-actions\" hidden>");
                     if row.options.is_empty() { out.push_str("<button type=\"button\" data-sheet-accept>Accept</button>"); }
+                    if !row.options.is_empty() { out.push_str("<div class=\"mk-sheet-options\">"); }
                     for option in row.options {
-                        write!(out, "<button type=\"button\" data-sheet-option=\"{}\" data-label=\"{}\">{}{}{}</button>", esc(&option.id), esc(&option.label), esc(&option.label), if row.recommended_option == Some(option.id.as_str()) { " · Recommended" } else { "" }, option.detail.as_deref().map(|detail| format!("<span class=\"mk-option-detail\">{}</span>", esc(detail))).unwrap_or_default()).unwrap();
+                        write!(out, "<button type=\"button\" data-sheet-option=\"{}\" data-label=\"{}\" aria-pressed=\"false\"><span>{}{}</span><span class=\"mk-option-detail\">{}</span></button>", esc(&option.id), esc(&option.label), esc(&option.label), if row.recommended_option == Some(option.id.as_str()) { " <span class=\"mk-option-recommended\">Recommended</span>" } else { "" }, option.detail.as_deref().map(esc).unwrap_or_else(|| "&nbsp;".into())).unwrap();
                     }
+                    if !row.options.is_empty() { out.push_str("</div>"); }
                     out.push_str("<button type=\"button\" data-sheet-answer>Answer differently</button>");
                     if row.optional { out.push_str("<button type=\"button\" data-sheet-reject>Don't do this</button>"); }
                     out.push_str("<button type=\"button\" data-sheet-undo>Undo</button><label>💬 <input data-sheet-note maxlength=\"600\" placeholder=\"Note\"></label><span data-sheet-status></span></div>");

@@ -383,7 +383,7 @@ impl DecisionSheet {
                     DecisionOutcome::Rejected => "rejected",
                 }
                 .into();
-                status.date = chrono::DateTime::from_timestamp_millis(decision.at)
+                status.date = (decision.at > 0).then(|| chrono::DateTime::from_timestamp_millis(decision.at)).flatten()
                     .map(|at| at.format("%Y-%m-%d").to_string());
             }
         }
@@ -642,6 +642,15 @@ mod tests {
         for invalid in [source.replace("\"id\":\"night\"", "\"id\":\"save\""), source.replace("\"recommendedOption\":\"save\"", "\"recommendedOption\":\"missing\""), source.replace(",{\"id\":\"night\",\"label\":\"Night\"}", "")].iter() {
             assert!(DecisionSheet::parse(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn missing_decision_date_is_not_rendered_as_epoch() {
+        let mut sheet = DecisionSheet::parse(r#"{"kind":"decision-sheet","title":"T","flows":[{"id":"f","title":"Flow","status":{"state":"open"},"steps":[]}]}"#).unwrap();
+        let decision = SheetDecision { row_id: "f".into(), outcome: DecisionOutcome::Decided, option_id: None, label: None, override_recommendation: false, note: None, at: 0, revision: 1 };
+        sheet.apply_decisions(&[decision]);
+        assert!(sheet.flows[0].status.date.is_none());
+        assert!(!crate::decision_sheet_render::render(&sheet).contains("1970-01-01"));
     }
 
     #[test]
