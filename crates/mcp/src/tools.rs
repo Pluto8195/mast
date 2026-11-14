@@ -2031,6 +2031,7 @@ impl Tools {
                     return false;
                 }
                 reachable(origin, c, allow_self, admin_ok)
+                    || (reach == Reach::ArchiveScope && admin_reaches(origin, c))
                     || (!c.archived
                         && c.space_id.as_deref() == Some(origin.space_id.as_str())
                         && parent.as_deref() == Some(c.id.as_str()))
@@ -2272,13 +2273,13 @@ enum Reach {
 fn reachable(origin: &AgentOrigin, chat: &Chat, allow_self: bool, admin_ok: bool) -> bool {
     chat.parent_chat_id.as_deref() == Some(origin.chat_id.as_str())
         || (allow_self && chat.id == origin.chat_id)
-        || (admin_ok && admin_reaches(origin, chat))
+        || (admin_ok && !chat.archived && admin_reaches(origin, chat))
 }
 
 /// An admin chat (a live user grant, re-checked at every authenticate) reaches
 /// the chats of its granted Space, never another Space's.
 fn admin_reaches(origin: &AgentOrigin, chat: &Chat) -> bool {
-    !chat.archived && origin
+    origin
         .admin_space_id
         .as_deref()
         .is_some_and(|space| chat.space_id.as_deref() == Some(space))
@@ -3041,6 +3042,8 @@ mod tests {
             let error = admin.call(name, json!({"chat":"chat-alpha-1", "text":"Hello", "timeout_secs":1})).await.unwrap_err();
             assert!(error.contains("no chat matches") || error.contains("agents can only"), "{name}: {error}");
         }
+        let restored = admin.call("archive_chat", json!({"chat":"chat-alpha-1", "archived":false})).await.unwrap();
+        assert_eq!(restored["archived"], false);
     }
 
     #[tokio::test]
