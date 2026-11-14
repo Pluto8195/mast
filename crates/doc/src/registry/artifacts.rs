@@ -416,6 +416,8 @@ mod tests {
         let decisions = vec![SheetDecision {
             row_id: "D-2".into(),
             outcome: DecisionOutcome::Decided,
+            option_id: None,
+            label: None,
             override_recommendation: false,
             note: Some("yes".into()),
             at: 2,
