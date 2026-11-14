@@ -2022,17 +2022,6 @@ impl Tools {
         } else {
             Vec::new()
         };
-        let last_sender = if reach == Reach::MessageScope {
-            let entries = self.zeron.transcript(&origin.chat_id).await.unwrap_or_default();
-            let messages = render_entries(&entries, RenderOptions::default());
-            messages.iter().rev().filter(|message| message.role == mast_doc::MessageRole::User)
-                .find_map(|message| {
-                    let header = message.text.strip_prefix(mast_proto::RELAYED_MESSAGE_PREFIX)?
-                        .split_once(".]\n")?.0;
-                    let key = header.rsplit_once("chat ")?.1.trim();
-                    resolve_chat_in(&all, key).ok().map(|chat| chat.id)
-                })
-        } else { None };
         let chats: Vec<Chat> = all
             .into_iter()
             .filter(|c| {
@@ -2042,14 +2031,14 @@ impl Tools {
                 reachable(origin, c, allow_self, admin_ok)
                     || (!c.archived && c.space_id.as_deref() == Some(origin.space_id.as_str())
                         && (parent.as_deref() == Some(c.id.as_str())
-                            || last_sender.as_deref() == Some(c.id.as_str())))
+                            ))
                     || (!c.archived && project_chats.contains(&c.id))
             })
             .collect();
         resolve_chat_in(&chats, key).map_err(|_| {
             if matches!(reach, Reach::CommunicationScope | Reach::MessageScope | Reach::ReadScope) {
                 let extra = match reach {
-                    Reach::MessageScope => ", your parent, and the chat that last messaged you",
+                    Reach::MessageScope => ", and your parent",
                     Reach::ReadScope => "",
                     _ => "",
                 };
@@ -2420,7 +2409,6 @@ mod tests {
         /// The engine's finished-worker verdicts for the agent's archive scope.
         archive_info: Vec<(&'static str, Value)>,
         pending_questions: Option<Value>,
-        relay_message: Option<&'static str>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2511,10 +2499,6 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
-                methods::WATCH_DOC_MESSAGES if self.relay_message.is_some() => stream(json!({ "reset": [
-                    { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
-                      "parts": [{ "kind": "text", "id": "t", "text": self.relay_message }] }
-                ]})),
                 methods::WATCH_DOC_MESSAGES if self.pending_questions.is_some() => stream(json!({ "reset": [
                     { "id": "a1", "role": "assistant", "createdAt": 2, "deviceId": "dev-local", "status": "streaming",
                       "parts": [{ "kind": "input", "id": "i", "requestId": "r1", "questions": self.pending_questions, "resolved": false }] }
@@ -3022,16 +3006,6 @@ mod tests {
         assert_eq!(params["command"]["request"]["cwd"], "/repo/comet");
         assert_eq!(params["command"]["request"]["harness"], "claude-code");
         assert_eq!(params["command"]["request"]["model"], "opus");
-    }
-
-    #[tokio::test]
-    async fn worker_can_reply_to_the_last_sender() {
-        let world = Arc::new(World {
-            relay_message: Some("[Message from Mast chat Alpha (chat-alp). Reply to it with the Mast `send_message` tool, chat chat-alp.]\n\nPlease review"),
-            ..World::default()
-        });
-        let result = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat": "chat-alpha-1", "text": "Done"})).await.unwrap();
-        assert_eq!(result["chatId"], "chat-alpha-1");
     }
 
     #[tokio::test]
