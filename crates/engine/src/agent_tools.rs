@@ -1725,7 +1725,7 @@ impl AgentToolsService {
                 };
             if !valid {
                 return Err(AgentToolError::invalid(format!(
-                    "invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url",
+                    "invalid link '{}'; allowed target types: artifact, file, diff, pr, chat, url; example: {{\"label\":\"Changes\",\"target\":{{\"type\":\"diff\",\"branch\":\"feature\"}}}}",
                     link.label
                 )));
             }
