@@ -2027,8 +2027,9 @@ impl Tools {
                     return false;
                 }
                 reachable(origin, c, allow_self, admin_ok)
-                    || parent.as_deref() == Some(c.id.as_str())
-                    || last_sender.as_deref() == Some(c.id.as_str())
+                    || (!c.archived && c.space_id.as_deref() == Some(origin.space_id.as_str())
+                        && (parent.as_deref() == Some(c.id.as_str())
+                            || last_sender.as_deref() == Some(c.id.as_str())))
                     || (!c.archived && project_chats.contains(&c.id))
             })
             .collect();
@@ -2396,6 +2397,7 @@ mod tests {
         destination: Option<&'static str>,
         /// When set, chat-beta-2 (the agent) was started by this chat.
         beta_parent: Option<&'static str>,
+        alpha_archived: bool,
         /// When set, alpha's assistant reply is this many bytes long.
         big_reply: Option<usize>,
         /// When set, alpha has a working session row.
@@ -2467,6 +2469,7 @@ mod tests {
                             "createdAt": "2026-09-02T00:00:00Z"
                         }),
                     ];
+                    chats[0]["archived"] = json!(self.alpha_archived);
                     if let Some(parent) = self.beta_parent {
                         chats[1]["parentChatId"] = json!(parent);
                     }
@@ -3016,6 +3019,13 @@ mod tests {
         });
         let result = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat": "chat-alpha-1", "text": "Done"})).await.unwrap();
         assert_eq!(result["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn archived_parent_is_not_reachable() {
+        let world = Arc::new(World { beta_parent: Some("chat-alpha-1"), alpha_archived: true, ..World::default() });
+        let error = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Done"})).await.unwrap_err();
+        assert!(error.contains("no chat matches"), "{error}");
     }
 
     #[tokio::test]
