@@ -20,7 +20,7 @@ const CSS: &str = r#"
 .mk-sheet-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
 .mk-sheet-actions[hidden], .mk-sheet-note[hidden] { display:none; }
 .mk-sheet-actions button, .mk-sheet-bar button { font:inherit; font-size:13px; font-weight:600; border:0; border-radius:14px; padding:4px 14px; cursor:pointer; color:var(--foreground); }
-.mk-sheet-actions [data-sheet-accept], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
+.mk-sheet-actions [data-sheet-accept], .mk-sheet-actions [data-sheet-option], .mk-sheet-bar [data-sheet-send] { background:color-mix(in srgb,var(--mk-green) 30%,var(--background)); }
 .mk-sheet-actions [data-sheet-reject], .mk-sheet-actions [data-sheet-answer] { background:color-mix(in srgb,var(--foreground) 6%,var(--background)); color:var(--muted-foreground); }
 .mk-sheet-actions [data-sheet-change], .mk-sheet-actions [data-sheet-undo], .mk-sheet-actions [data-sheet-note-toggle], .mk-sheet-bar [data-sheet-discard] { background:transparent; color:var(--muted-foreground); padding:4px 3px; }
 .mk-sheet .mk-sheet-note { grid-column:1 / -1; color:var(--muted-foreground); font-size:12px; }
@@ -47,7 +47,11 @@ const SCRIPT: &str = r#"(() => {
   bar.append(label, send, discard); const sheet = document.querySelector('.mk-sheet'); sheet.insertBefore(bar, sheet.querySelector('h1').nextSibling);
   document.querySelectorAll('[data-sheet-row]').forEach(row => {
     const controls = row.querySelector('.mk-sheet-actions');
-    if (!controls) return;
+    if (!controls) {
+      const saved = sent.get(row.getAttribute('data-sheet-row'));
+      if (saved && saved.outcome === 'option') { const chosen = document.createElement('div'); chosen.className='mk-recommendation'; chosen.textContent=`Chosen: ${saved.label}`; row.firstElementChild.appendChild(chosen); }
+      return;
+    }
     const note = controls.querySelector('label'); const input = note.querySelector('input');
     note.className = 'mk-sheet-note'; note.textContent = 'Note'; note.appendChild(input); note.hidden = true; row.appendChild(note);
     const toggle = document.createElement('button'); toggle.type='button'; toggle.textContent='Note'; toggle.setAttribute('data-sheet-note-toggle',''); toggle.setAttribute('aria-label','Add note');
@@ -64,10 +68,11 @@ const SCRIPT: &str = r#"(() => {
       const chip = row.querySelector(':scope > .mk-chip');
       if (chip) {
         const result = saved || draft;
-        chip.className = result ? `mk-chip mk-sheet-staged ${result.outcome === 'decided' ? 'mk-sheet-accepted' : 'mk-sheet-rejected'}` : 'mk-chip mk-open';
-        chip.textContent = result ? `${result.outcome === 'rejected' ? "Won't do" : result.overrideRecommendation ? 'Answered' : 'Accepted'}${draft && !saved ? ' · not sent' : ''}` : 'Open';
+        chip.className = result ? `mk-chip mk-sheet-staged ${result.outcome !== 'rejected' ? 'mk-sheet-accepted' : 'mk-sheet-rejected'}` : 'mk-chip mk-open';
+        chip.textContent = result ? `${result.outcome === 'rejected' ? "Won't do" : result.outcome === 'option' ? `Chose: ${result.label}` : result.overrideRecommendation ? 'Answered' : 'Accepted'}${draft && !saved ? ' · not sent' : ''}` : 'Open';
       }
-      controls.querySelector('[data-sheet-accept]').hidden = !!draft && !editing;
+      const accept = controls.querySelector('[data-sheet-accept]'); if (accept) accept.hidden = !!draft && !editing;
+      controls.querySelectorAll('[data-sheet-option]').forEach(button => button.hidden = !!draft && !editing);
       const reject = controls.querySelector('[data-sheet-reject]'); if (reject) reject.hidden = !!draft && !editing;
       controls.querySelector('[data-sheet-answer]').hidden = !!draft && !editing;
       controls.querySelector('[data-sheet-answer]').textContent = answering.has(id) ? 'Stage answer' : 'Answer differently';
@@ -86,14 +91,15 @@ const SCRIPT: &str = r#"(() => {
     const id = row.getAttribute('data-sheet-row'), controls = row.querySelector('.mk-sheet-actions');
     if (!controls || sent.has(id)) return;
     const input = row.querySelector('.mk-sheet-note input');
-    const stage = (outcome, overrideRecommendation=false) => { errors.delete(id); const note=input.value; if (overrideRecommendation && !note.trim()) { errors.set(id,'Your answer is required.'); update(); input.focus(); return; } notes.set(id,note); drafts.set(id,{rowId:id,outcome,note,overrideRecommendation}); answering.delete(id); changing.delete(id); post({t:'sheet-stage',id,outcome,note,overrideRecommendation}); update(); };
-    controls.querySelector('[data-sheet-accept]').onclick = () => stage('decided');
+    const stage = (outcome, overrideRecommendation=false, optionId=null, optionLabel=null) => { errors.delete(id); const note=input.value; if (overrideRecommendation && !note.trim()) { errors.set(id,'Your answer is required.'); update(); input.focus(); return; } notes.set(id,note); drafts.set(id,{rowId:id,outcome,note,overrideRecommendation,optionId,label:optionLabel}); answering.delete(id); changing.delete(id); post({t:'sheet-stage',id,outcome,note,overrideRecommendation,optionId}); update(); };
+    const accept = controls.querySelector('[data-sheet-accept]'); if (accept) accept.onclick = () => stage('decided');
+    controls.querySelectorAll('[data-sheet-option]').forEach(button => button.onclick = () => stage('option',false,button.getAttribute('data-sheet-option'),button.dataset.label));
     const reject = controls.querySelector('[data-sheet-reject]'); if (reject) reject.onclick = () => stage('rejected');
     controls.querySelector('[data-sheet-answer]').onclick = () => { if (answering.has(id)) stage('decided',true); else { answering.add(id); noteOpen.add(id); update(); input.focus(); } };
     controls.querySelector('[data-sheet-change]').onclick = () => { changing.add(id); update(); };
     controls.querySelector('[data-sheet-undo]').onclick = () => { drafts.delete(id); notes.delete(id); noteOpen.delete(id); changing.delete(id); answering.delete(id); errors.delete(id); input.value=''; post({t:'sheet-undo',id}); update(); };
     controls.querySelector('[data-sheet-note-toggle]').onclick = () => { if (noteOpen.has(id)) noteOpen.delete(id); else noteOpen.add(id); update(); if (noteOpen.has(id)) input.focus(); };
-    input.oninput = () => { notes.set(id,input.value); const draft = drafts.get(id); if (draft && !changing.has(id) && !answering.has(id)) { if (draft.overrideRecommendation && !input.value.trim()) { errors.set(id,'Your answer is required.'); } else { errors.delete(id); draft.note=input.value; post({t:'sheet-stage',id,outcome:draft.outcome,note:input.value,overrideRecommendation:!!draft.overrideRecommendation}); } update(); } };
+    input.oninput = () => { notes.set(id,input.value); const draft = drafts.get(id); if (draft && !changing.has(id) && !answering.has(id)) { if (draft.overrideRecommendation && !input.value.trim()) { errors.set(id,'Your answer is required.'); } else { errors.delete(id); draft.note=input.value; post({t:'sheet-stage',id,outcome:draft.outcome,note:input.value,overrideRecommendation:!!draft.overrideRecommendation,optionId:draft.optionId}); } update(); } };
   });
   discard.onclick = () => { drafts.clear(); notes.clear(); noteOpen.clear(); changing.clear(); answering.clear(); errors.clear(); post({t:'sheet-discard'}); update(); };
   const setBusy = busy => { send.disabled=busy; discard.disabled=busy; document.querySelectorAll('.mk-sheet-actions button,.mk-sheet-note input').forEach(node => node.disabled=busy); };

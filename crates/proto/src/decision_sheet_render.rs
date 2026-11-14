@@ -102,7 +102,7 @@ pub fn render(sheet: &DecisionSheet) -> String {
                     out.push_str("<div class=\"mk-sheet-actions\" hidden>");
                     if row.options.is_empty() { out.push_str("<button type=\"button\" data-sheet-accept>Accept</button>"); }
                     for option in row.options {
-                        write!(out, "<button type=\"button\" data-sheet-option=\"{}\" title=\"{}\">{}{}</button>", esc(&option.id), esc(option.detail.as_deref().unwrap_or("")), esc(&option.label), if row.recommended_option == Some(option.id.as_str()) { " · Recommended" } else { "" }).unwrap();
+                        write!(out, "<button type=\"button\" data-sheet-option=\"{}\" data-label=\"{}\" title=\"{}\">{}{}</button>", esc(&option.id), esc(&option.label), esc(option.detail.as_deref().unwrap_or("")), esc(&option.label), if row.recommended_option == Some(option.id.as_str()) { " · Recommended" } else { "" }).unwrap();
                     }
                     out.push_str("<button type=\"button\" data-sheet-answer>Answer differently</button>");
                     if row.optional { out.push_str("<button type=\"button\" data-sheet-reject>Don't do this</button>"); }

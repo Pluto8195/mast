@@ -225,6 +225,10 @@ pub struct OutOfScope {
 pub struct SheetDecision {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub override_recommendation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,6 +243,7 @@ pub struct SheetDecision {
 pub enum DecisionOutcome {
     Decided,
     Rejected,
+    Option,
 }
 
 /// A decision awaiting submission from the local draft.
@@ -247,6 +252,10 @@ pub enum DecisionOutcome {
 pub struct SheetDecisionDraft {
     pub row_id: String,
     pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub override_recommendation: bool,
     #[serde(default)]
@@ -299,9 +308,11 @@ pub fn decision_batch_message(title: &str, decisions: &[SheetDecision]) -> Strin
             if decision.override_recommendation {
                 return format!("{} answered: {}", decision.row_id, decision.note.as_deref().unwrap_or("").trim());
             }
+            if decision.outcome == DecisionOutcome::Option { return format!("{} chose: {}", decision.row_id, decision.label.as_deref().unwrap_or("")); }
             let outcome = match decision.outcome {
                 DecisionOutcome::Decided => "accepted",
                 DecisionOutcome::Rejected => "rejected",
+                DecisionOutcome::Option => "chose",
             };
             let note = decision
                 .note
@@ -338,7 +349,7 @@ pub fn markdown(sheet: &DecisionSheet, decisions: &[SheetDecision]) -> String {
         let decision = decisions.iter().rev().find(|d| d.row_id == row.id);
         let state = decision
             .map(|d| match d.outcome {
-                DecisionOutcome::Decided => "decided",
+                DecisionOutcome::Decided | DecisionOutcome::Option => "decided",
                 DecisionOutcome::Rejected => "rejected",
             })
             .unwrap_or(&row.status.state);
@@ -349,6 +360,7 @@ pub fn markdown(sheet: &DecisionSheet, decisions: &[SheetDecision]) -> String {
         if let Some(recommendation) = row.recommendation {
             let _ = writeln!(out, "\nRecommendation: {recommendation}");
         }
+        if let Some(label) = decision.and_then(|d| d.label.as_deref()) { let _ = writeln!(out, "\nChosen: {label}"); }
         if let Some(note) = decision.and_then(|d| d.note.as_deref()) {
             let _ = writeln!(out, "\nAnswer: {note}");
         }
@@ -366,7 +378,7 @@ impl DecisionSheet {
                 .find(|decision| decision.row_id == id)
             {
                 status.state = match decision.outcome {
-                    DecisionOutcome::Decided => "decided",
+                    DecisionOutcome::Decided | DecisionOutcome::Option => "decided",
                     DecisionOutcome::Rejected => "rejected",
                 }
                 .into();
@@ -568,7 +580,7 @@ mod tests {
     use super::*;
     #[test]
     fn answer_override_is_distinct_from_an_acceptance_note() {
-        let decision = SheetDecision { row_id: "D-3".into(), outcome: DecisionOutcome::Decided,
+        let decision = SheetDecision { row_id: "D-3".into(), outcome: DecisionOutcome::Decided, option_id: None, label: None,
             override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 1 };
         assert_eq!(decision_batch_message("T", &[decision]), "Decisions for T: D-3 answered: Use UTC");
     }
@@ -592,7 +604,7 @@ mod tests {
         let decisions = vec![
             SheetDecision {
                 row_id: "D-2".into(),
-                outcome: DecisionOutcome::Decided,
+                outcome: DecisionOutcome::Decided, option_id: None, label: None,
                 override_recommendation: false,
                 note: None,
                 at: 20,
@@ -600,7 +612,7 @@ mod tests {
             },
             SheetDecision {
                 row_id: "D-4".into(),
-                outcome: DecisionOutcome::Rejected,
+                outcome: DecisionOutcome::Rejected, option_id: None, label: None,
                 override_recommendation: false,
                 note: Some("too slow".into()),
                 at: 20,
@@ -625,7 +637,7 @@ mod tests {
     fn markdown_shows_recorded_answers() {
         let sheet = DecisionSheet::parse(include_str!("../../../docs/artifact-kit/decision-sheet-example.json")).unwrap();
         let row_id = sheet.decision_rows()[0].id.to_owned();
-        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
+        let decision = SheetDecision { row_id, outcome: DecisionOutcome::Decided, option_id: None, label: None, override_recommendation: true, note: Some("Use UTC".into()), at: 1, revision: 2 };
         let text = markdown(&sheet, &[decision]);
         assert!(text.contains("Status: decided"));
         assert!(text.contains("Answer: Use UTC"));
