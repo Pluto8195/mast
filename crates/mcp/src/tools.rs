@@ -19,7 +19,9 @@
 //!   the caller's;
 //! - Communication reaches created chats and non-archived chats in the caller's
 //!   item subtree or project; messages also reach the parent and latest sender.
-//!   Interrupt and archive have separate restrictions;
+//!   Admins may send and read in their Space, subject to send sandbox limits.
+//!   Respond and interrupt remain limited to direct children, including for admins;
+//!   archive has separate restrictions;
 //! - `list_projects` / `list_devices` list only the token's Space / device;
 //!   `list_harnesses` / `list_models` (this device's capabilities) and
 //!   `whoami` are unscoped.
@@ -213,7 +215,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "respond_to_input",
-            description: "Answer a question a reachable chat's agent is blocked on (chats you created or non-archived chats on items in your subtree or project) (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
+            description: "Answer a question an agent in a chat you created is blocked on (see get_chat / wait_for_turn pendingInput). Use option labels (case-insensitive), or free text for open questions. question_id may be omitted for a single question; otherwise use the ids from pendingInput.",
             input_schema: chat_key_schema(json!({
                 "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
                 "answers": {
