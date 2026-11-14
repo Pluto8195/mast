@@ -18,7 +18,7 @@
 //!   caller's cwd, and a sandbox / approval mode never more permissive than
 //!   the caller's;
 //! - Communication reaches created chats and non-archived chats in the caller's
-//!   item subtree or project; messages also reach the parent and latest sender.
+//!   item subtree or project; messages also reach the parent.
 //!   Admins may send and read in their Space, subject to send sandbox limits.
 //!   Respond and interrupt remain limited to direct children, including for admins;
 //!   archive has separate restrictions;
@@ -184,7 +184,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, your parent, or the chat that last messaged you. Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
+            description: "Send a message to a chat you created, a non-archived chat on an item in your subtree or project, or your parent. Messages are attributed to your chat, and a chat cannot message itself. A message to your parent is queued as a worker report (returns delivery `queuedForParent`, and `heldReason` while it waits): it reaches the parent in its next \"Worker updates:\" batch when the parent is idle and the user is not in it, so `mode` and `wait` do not apply; prefer `report_to_parent`. For other reachable chats: mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes (at most 1500 s; then turn.status is \"stillRunning\", call `wait_for_turn`) and returns the assistant's reply, cut to its tail when long (turn.truncated); if you did not wait, collect it later with `wait_for_turn`.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -2260,7 +2260,7 @@ enum Reach {
     SelfOrChild,
     /// Children and non-archived chats in the caller's item or project scope.
     CommunicationScope,
-    /// Communication scope, the caller, its parent and its latest sender.
+    /// Communication scope and the caller's parent.
     MessageScope,
     /// Communication scope and the caller itself.
     ReadScope,
