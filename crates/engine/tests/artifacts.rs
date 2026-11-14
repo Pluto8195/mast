@@ -2604,6 +2604,12 @@ async fn sheet_republication_updates_the_same_open_card() {
     assert_eq!(cards[0].chat_id, OTHER_CHAT);
     assert_eq!(artifact(&rig, id).current_owner_chat_id(), Some(OTHER_CHAT));
     assert!(cards[0].info.as_deref().unwrap().contains("Revision 2"));
+    rig.client.call(methods::MUTATE, json!({"op":"setChatArchived", "chatId":OTHER_CHAT, "archived":true})).await.unwrap();
+    sync.reconcile(id);
+    let fallback = outline.snapshot(SPACE).user_action_requests.into_iter().find(|r| r.id == card_id).unwrap();
+    assert_eq!(fallback.chat_id, CHAT);
+    rig.client.call(methods::MUTATE, json!({"op":"setChatArchived", "chatId":OTHER_CHAT, "archived":false})).await.unwrap();
+    sync.reconcile(id);
     rig.client.call(methods::WORK_OUTLINE_MUTATE, json!({"op":"resolveUserActionRequest", "userActionRequestId":card_id,
         "note":"I'll return to this", "operationId":"resolve-sheet-card"})).await.unwrap();
     sync.reconcile(id);
