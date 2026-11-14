@@ -2278,7 +2278,7 @@ fn reachable(origin: &AgentOrigin, chat: &Chat, allow_self: bool, admin_ok: bool
 /// An admin chat (a live user grant, re-checked at every authenticate) reaches
 /// the chats of its granted Space, never another Space's.
 fn admin_reaches(origin: &AgentOrigin, chat: &Chat) -> bool {
-    origin
+    !chat.archived && origin
         .admin_space_id
         .as_deref()
         .is_some_and(|space| chat.space_id.as_deref() == Some(space))
@@ -3031,6 +3031,16 @@ mod tests {
         let world = Arc::new(World { beta_parent: Some("chat-alpha-1"), alpha_archived: true, ..World::default() });
         let error = tools(world, Some(BETA_TOKEN)).call("send_message", json!({"chat":"chat-alpha-1", "text":"Done"})).await.unwrap_err();
         assert!(error.contains("no chat matches"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn admin_cannot_reach_archived_chat() {
+        let world = Arc::new(World { alpha_archived: true, ..World::default() });
+        let admin = tools(world, Some(ADMIN_TOKEN));
+        for name in ["get_chat", "read_chat", "send_message", "wait_for_turn"] {
+            let error = admin.call(name, json!({"chat":"chat-alpha-1", "text":"Hello", "timeout_secs":1})).await.unwrap_err();
+            assert!(error.contains("no chat matches") || error.contains("agents can only"), "{name}: {error}");
+        }
     }
 
     #[tokio::test]
