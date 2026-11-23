@@ -55,9 +55,7 @@ pub fn render(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Stateful<gpui
         },
     )
     .size(px(16.0));
-    let label = fraction
-        .map(|f| format!("{:.0}%", f * 100.0))
-        .unwrap_or_else(|| "—".into());
+    let label = percentage_label(usage);
     div()
         .id("context-usage")
         .flex_none()
@@ -74,6 +72,12 @@ pub fn render(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Stateful<gpui
         .child(ring)
         .child(SharedString::from(label))
         .tooltip(move |_, cx| cx.new(|_| UsageCard { usage }).into())
+}
+
+fn percentage_label(usage: Option<ContextUsage>) -> String {
+    usage.and_then(ContextUsage::fraction)
+        .map(|fraction| format!("{:.0}%", fraction * 100.0))
+        .unwrap_or_else(|| "—".into())
 }
 
 struct UsageCard {
@@ -164,6 +168,13 @@ impl Render for UsageCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn percentage_and_details_use_the_same_usage() {
+        let usage = Some(ContextUsage { tokens: Some(183_925), window: Some(1_000_000) });
+        assert_eq!(percentage_label(usage), "18%");
+        assert!(details(usage).contains("183,925 / 1,000,000 tokens"));
+    }
+
     #[test]
     fn indicator_needs_a_reported_window() {
         assert!(!has_window(None));

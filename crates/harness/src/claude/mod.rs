@@ -1256,6 +1256,20 @@ mod tests {
     }
 
     #[test]
+    fn native_context_ignores_saved_selection() {
+        let harness = ClaudeHarness::new();
+        let mut request = plain_request();
+        request.model = Some("claude-opus-5-5".into());
+        for choice in ["200k", "1m"] {
+            request.model_options.insert("contextWindow".into(), json!(choice));
+            let args = argv(&harness, &request);
+            assert_eq!(flag_value(&args, "--model"), Some("claude-opus-5-5"));
+        }
+        request.model = Some("claude-legacy".into());
+        assert_eq!(flag_value(&argv(&harness, &request), "--model"), Some("claude-legacy[1m]"));
+    }
+
+    #[test]
     fn read_only_denies_mutating_tools_and_never_bypasses_permissions() {
         let harness = ClaudeHarness::new();
         for auto_approve in [false, true] {

@@ -381,6 +381,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_models_do_not_offer_context_selection() {
+        for model in static_models().iter().filter(|model| native_million_context(&model.id)) {
+            assert!(!model.options.iter().any(|option| option.id == "contextWindow"));
+        }
+    }
+
+    #[test]
     fn the_curated_catalog_offers_the_mast_default() {
         let id = mast_proto::HarnessId::ClaudeCode.default_model().unwrap();
         assert_eq!(id, "claude-opus-5-5");
