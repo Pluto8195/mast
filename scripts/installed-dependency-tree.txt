@@ -3212,6 +3212,7 @@ mast v0.2.82 (<workspace>/apps/mast) []
 │   │   └── tokio v1.53.1 [bytes,default,fs,full,io-std,io-util,libc,macros,mio,net,parking_lot,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,time,tokio-macros,windows-sys] (*)
 │   ├── image v0.25.10 [bmp,dds,exr,ff,gif,hdr,ico,jpeg,png,pnm,qoi,rayon,tga,tiff,webp] (*)
 │   ├── libc v0.2.189 [default,extra_traits,std]
+│   ├── lsp-types v0.97.0 [default,proposed] (*)
 │   ├── mast-doc v0.2.82 (<workspace>/crates/doc) [] (*)
 │   ├── mast-engine v0.2.82 (<workspace>/crates/engine) [] (*)
 │   ├── mast-harness v0.2.82 (<workspace>/crates/harness) [] (*)
