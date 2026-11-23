@@ -70,6 +70,29 @@ fn input_layout_retains_projection_through_edits_ime_and_undo(cx: &mut gpui::Tes
 }
 
 #[gpui::test]
+fn context_indicator_updates_when_usage_changes(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    let composer = handle.root(cx).unwrap();
+    let state = composer.read_with(cx, |composer, _| composer.state.clone());
+    state.update(cx, |state, cx| {
+        state.selected_chat = Some("chat".into());
+        state.context_usage = Some(mast_proto::ContextUsage { tokens: Some(72_000), window: Some(200_000) });
+        cx.notify();
+    });
+    composer.update(cx, |composer, cx| composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx));
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| { window.draw(cx).clear(); }).unwrap();
+    assert!(cx.update_window(handle.into(), |_, window, _| window.debug_bounds_all().iter().any(|(id, _)| id == "context-usage-36%")).unwrap());
+    state.update(cx, |state, cx| {
+        state.context_usage = Some(mast_proto::ContextUsage { tokens: Some(183_925), window: Some(1_000_000) });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.update_window(handle.into(), |_, window, _| window.debug_bounds_all().iter().any(|(id, _)| id == "context-usage-18%")).unwrap());
+    assert!(cx.update_window(handle.into(), |_, window, _| !window.debug_bounds_all().iter().any(|(id, _)| id == "context-usage-36%")).unwrap());
+}
+
+#[gpui::test]
 fn plain_cursor_movement_does_not_redraw_composer(cx: &mut gpui::TestAppContext) {
     let (_dir, handle) = composer_focus_window(cx);
     let composer = handle.root(cx).unwrap();

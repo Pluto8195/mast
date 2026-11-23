@@ -547,6 +547,7 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
+    context_indicator: Entity<crate::context_usage::ContextIndicator>,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Throttle for "the user is acting here" pings to the engine (orchestrator
@@ -813,6 +814,7 @@ impl Composer {
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let context_indicator = cx.new(|cx| crate::context_usage::ContextIndicator::new(state.clone(), cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -975,6 +977,7 @@ impl Composer {
             height_morph: None,
             morph_clock: Instant::now(),
             route_snap_until: None,
+            context_indicator,
             _observe: observe,
             _pickers_observe: pickers_observe,
             _picker_focus: picker_focus,
@@ -2249,9 +2252,7 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let usage = self.state.read(cx).context_usage;
-            let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage)).then(||
-                crate::context_usage::render(usage, &theme).into_any_element());
+            let usage = (session_chrome_opacity > 0.0).then(|| self.context_indicator.clone().into_any_element());
             container.child(crate::components::conversation_footer_slot(
                 SESSION_FOOTER_HEIGHT, bottom_slot, new_thread_chrome_opacity, session_chrome_opacity,
                 new_thread_git_selectors.map(|el| el.into_any_element()),
