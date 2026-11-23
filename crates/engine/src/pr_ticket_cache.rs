@@ -45,6 +45,41 @@ const DIFF_STAT_TTL: Duration = Duration::from_secs(25);
 /// every `CACHE_TTL` kept the sweep busy forever. A PR Mast opens is linked durably (by
 /// URL), so this only delays noticing a PR opened elsewhere.
 const NEGATIVE_PR_TTL: Duration = Duration::from_secs(600);
+/// A PR state with no successful check for this long is no longer served (a merged PR is
+/// terminal and exempt).
+const STALE_PR_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Backoff between lookups of one key after a transient `gh` failure.
+const PR_RETRY_BASE: Duration = Duration::from_secs(30);
+const PR_RETRY_CEILING: Duration = Duration::from_secs(15 * 60);
+
+/// What one throttled sweep lookup found.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PrLookup {
+    Found(PrStatus),
+    /// `gh` said the PR does not exist.
+    NotFound,
+    /// Transient failure (network, auth, no `gh`): keep what we know.
+    Error,
+}
+
+/// A PR cache batch result: what changed, for subscribers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCacheUpdate {
+    pub revision: u64,
+    /// PR URLs whose cached state changed (old and new).
+    pub urls: Vec<String>,
+    /// Branch lookups whose result changed (checkout path and branch), so the
+    /// chats on those branches can be refreshed.
+    pub branches: Vec<PrBranchKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrBranchKey {
+    pub cwd: String,
+    pub branch: String,
+}
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(20);
 /// Opted-in completion observations are discovered at most once per three minutes.
@@ -81,7 +116,7 @@ pub enum PrAction {
     ReadyToMerge,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatus {
     #[serde(default)]
@@ -140,7 +175,7 @@ impl PrStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TicketStatus {
     pub identifier: String,
@@ -166,7 +201,7 @@ pub struct DiffStat {
 /// knows about it.  Keeping the URL/source even while `detail` is still
 /// pending lets the overview render every attached PR immediately instead of
 /// collapsing cache misses back into a single anonymous slot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrLinkStatus {
     pub url: String,
@@ -179,7 +214,7 @@ pub struct PrLinkStatus {
 /// hasn't gotten to it yet; the caller can't distinguish those without
 /// polling again, matching the reference implementation's own cache-read
 /// contract.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatLinkStatus {
     pub pr: Option<PrStatus>,
@@ -292,6 +327,16 @@ impl Entry<PrStatus> {
     fn fresh_pr(&self) -> bool {
         self.fresh(if self.data.is_none() { NEGATIVE_PR_TTL } else { CACHE_TTL })
     }
+
+    /// An expired hit that may still be shown while a refresh runs.
+    fn servable_stale(&self) -> bool {
+        self.data.as_ref().is_some_and(|status| status.state.eq_ignore_ascii_case("merged")
+            || self.fetched_at.elapsed() < STALE_PR_LIMIT)
+    }
+
+    fn is_merged(&self) -> bool {
+        self.data.as_ref().is_some_and(|status| status.state.eq_ignore_ascii_case("merged"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -306,7 +351,9 @@ struct Inner {
     pr_cache: Mutex<HashMap<PrKey, Entry<PrStatus>>>,
     ticket_cache: Mutex<HashMap<TicketKey, Entry<TicketStatus>>>,
     pending_pr: Mutex<HashSet<PrKey>>,
-    pr_revision: tokio::sync::watch::Sender<u64>,
+    pr_revision: tokio::sync::watch::Sender<PrCacheUpdate>,
+    /// Failure count and earliest next lookup per PR key after a transient error.
+    pr_retry: Mutex<HashMap<PrKey, (u32, Instant)>>,
     pending_ticket: Mutex<HashSet<TicketKey>>,
     linear_ticket_revisions: Mutex<HashMap<Option<String>, u64>>,
     /// Keyed by cwd — a local, no-throttling-concern lookup (unlike
@@ -365,19 +412,32 @@ impl PrTicketCache {
             .map(|entry| entry.data.clone())
     }
 
+    /// Queue a refresh unless the entry is a merged PR (terminal) or the key is
+    /// backing off after a transient failure. Never hold `pr_cache` when calling.
+    fn queue_pr_refresh(&self, key: PrKey) {
+        // Only a PR URL is terminal once merged; a branch can be reused for a follow-up PR.
+        if matches!(key, PrKey::Url(_)) && lock(&self.inner.pr_cache).get(&key).is_some_and(Entry::is_merged) { return; }
+        if lock(&self.inner.pr_retry).get(&key).is_some_and(|(_, next)| Instant::now() < *next) { return; }
+        lock(&self.inner.pending_pr).insert(key);
+    }
+
     /// Read a cached item PR, scheduling the existing throttled sweep on a
     /// miss. Invalid URLs and a full pending queue are left unknown.
     pub fn request_pr_url(&self, url: &str) -> Option<Option<PrStatus>> {
         let canonical = crate::work_outline_pr_links::pull_request_from_url(url)?.url;
         if let Some(result) = self.peek_pr_url(url) { return Some(result); }
         if let Some(result) = self.peek_pr_url(&canonical) { return Some(result); }
-        let mut pending = lock(&self.inner.pending_pr);
-        if pending.len() < 512 { pending.insert(PrKey::Url(canonical)); }
-        None
+        let stale = {
+            let cache = lock(&self.inner.pr_cache);
+            [url, canonical.as_str()].into_iter()
+                .find_map(|key| cache.get(&PrKey::Url(key.to_owned())).filter(|entry| entry.servable_stale()).and_then(|entry| entry.data.clone()))
+        };
+        if lock(&self.inner.pending_pr).len() < 512 { self.queue_pr_refresh(PrKey::Url(canonical)); }
+        stale.map(Some)
     }
 
     /// Changes after a batch of PR cache results is stored by the existing sweep.
-    pub fn watch_pr_revision(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn watch_pr_revision(&self) -> tokio::sync::watch::Receiver<PrCacheUpdate> {
         self.inner.pr_revision.subscribe()
     }
 
@@ -395,7 +455,7 @@ impl PrTicketCache {
 
     pub fn new() -> Self {
         let (my_prs_ready, _) = tokio::sync::watch::channel(false);
-        let (pr_revision, _) = tokio::sync::watch::channel(0);
+        let (pr_revision, _) = tokio::sync::watch::channel(PrCacheUpdate::default());
         Self {
             inner: Arc::new(Inner {
                 merged_wakes: Mutex::new(None),
@@ -404,6 +464,7 @@ impl PrTicketCache {
                 ticket_cache: Mutex::new(HashMap::new()),
                 pending_pr: Mutex::new(HashSet::new()),
                 pr_revision,
+                pr_retry: Mutex::new(HashMap::new()),
                 pending_ticket: Mutex::new(HashSet::new()),
                 linear_ticket_revisions: Mutex::new(HashMap::new()),
                 diff_stat_cache: Mutex::new(HashMap::new()),
@@ -602,9 +663,17 @@ impl PrTicketCache {
             let cache = lock(&self.inner.pr_cache);
             let detail = match cache.get(&key) {
                 Some(entry) if entry.fresh_pr() => entry.data.clone(),
+                // Expired: keep showing the last known state while the
+                // sweep refreshes it, so a stage never falls back to "unknown".
+                Some(entry) if entry.servable_stale() => {
+                    let data = entry.data.clone();
+                    drop(cache);
+                    self.queue_pr_refresh(key);
+                    data
+                }
                 _ => {
                     drop(cache);
-                    lock(&self.inner.pending_pr).insert(key);
+                    self.queue_pr_refresh(key);
                     None
                 }
             };
@@ -648,34 +717,36 @@ impl PrTicketCache {
             _ => None,
         };
         if let Some(key) = branch_key {
-            let cache = lock(&self.inner.pr_cache);
-            match cache.get(&key) {
-                Some(entry) if entry.fresh_pr() => {
-                    if let Some(detail) = entry.data.clone() {
-                        let inferred_url = detail.url.clone().unwrap_or_default();
-                        if !inferred_url.is_empty()
-                            && !status.pr_links.iter().any(|link| link.url == inferred_url)
-                        {
-                            status.pr_links.push(PrLinkStatus {
-                                url: inferred_url,
-                                source: None,
-                                detail: Some(detail.clone()),
-                            });
-                            if status.pr.is_none() {
+            let mut refresh = false;
+            {
+                let cache = lock(&self.inner.pr_cache);
+                match cache.get(&key) {
+                    Some(entry) if entry.fresh_pr() || entry.servable_stale() => {
+                        // An expired inferred PR is still shown, but always re-checked
+                        // (a stacked PR may have merged), even with durable links.
+                        refresh = !entry.fresh_pr();
+                        if let Some(detail) = entry.data.clone() {
+                            let inferred_url = detail.url.clone().unwrap_or_default();
+                            if !inferred_url.is_empty()
+                                && !status.pr_links.iter().any(|link| link.url == inferred_url)
+                            {
+                                status.pr_links.push(PrLinkStatus {
+                                    url: inferred_url,
+                                    source: None,
+                                    detail: Some(detail.clone()),
+                                });
+                                if status.pr.is_none() {
+                                    status.pr = Some(detail);
+                                }
+                            } else if status.pr.is_none() {
                                 status.pr = Some(detail);
                             }
-                        } else if status.pr.is_none() {
-                            status.pr = Some(detail);
                         }
                     }
-                }
-                _ => {
-                    drop(cache);
-                    if !has_durable_pr_links {
-                        lock(&self.inner.pending_pr).insert(key);
-                    }
+                    _ => refresh = !has_durable_pr_links,
                 }
             }
+            if refresh { self.queue_pr_refresh(key); }
         }
 
         let ticket_id = linked_ticket_id
@@ -811,29 +882,24 @@ impl PrTicketCache {
                 }
             }
         }
-        let pr_keys: Vec<PrKey> = {
-            let mut pending = lock(&self.inner.pending_pr);
-            let take: Vec<PrKey> = pending.iter().take(KEYS_PER_SWEEP).cloned().collect();
-            for key in &take {
-                pending.remove(key);
-            }
-            take
-        };
+        let pr_keys = self.take_pending_prs();
         let mut pr_results = Vec::with_capacity(pr_keys.len());
         for key in pr_keys {
             let inner = self.inner.clone();
             let key2 = key.clone();
             let data = tokio::task::spawn_blocking(move || match &key2 {
                 PrKey::Branch { cwd, branch } => fetch_github_pr(cwd, branch),
-                PrKey::CheckoutBranch { cwd, branch } => {
-                    run_gh_pr_view(cwd, branch).map(|data| pr_json_to_status(&data))
-                }
+                PrKey::CheckoutBranch { cwd, branch } => match run_gh_pr_view(cwd, branch) {
+                    GhView::Found(data) => PrLookup::Found(pr_json_to_status(&data)),
+                    GhView::NotFound => PrLookup::NotFound,
+                    GhView::Error => PrLookup::Error,
+                },
                 PrKey::Url(url) => fetch_github_pr_by_url(url),
             })
             .await
-            .unwrap_or(None);
+            .unwrap_or(PrLookup::Error);
             let wakes = lock(&inner.merged_wakes).clone();
-            if let (Some(wakes), Some(status)) = (&wakes, &data) {
+            if let (Some(wakes), PrLookup::Found(status)) = (&wakes, &data) {
                 let url = match &key {
                     PrKey::Url(url) => Some(url.as_str()),
                     PrKey::Branch { .. } | PrKey::CheckoutBranch { .. } => status.url.as_deref(),
@@ -909,12 +975,69 @@ impl PrTicketCache {
         self.sweep_one_my_pr_detail().await;
     }
 
-    fn publish_pr_results(&self, results: Vec<(PrKey, Option<PrStatus>)>) {
+    /// Drain up to `KEYS_PER_SWEEP` pending PR keys, oldest observation first
+    /// (never-fetched keys first of all).
+    fn take_pending_prs(&self) -> Vec<PrKey> {
+        // One lock at a time: `queue_completion_observations` takes the cache
+        // before pending, so never hold pending while reading the cache.
+        let keys: Vec<PrKey> = lock(&self.inner.pending_pr).iter().cloned().collect();
+        let mut all: Vec<(Option<Instant>, PrKey)> = {
+            let cache = lock(&self.inner.pr_cache);
+            keys.into_iter().map(|key| (cache.get(&key).map(|entry| entry.fetched_at), key)).collect()
+        };
+        all.sort_by_key(|(at, _)| *at);
+        let take: Vec<PrKey> = all.into_iter().take(KEYS_PER_SWEEP).map(|(_, key)| key).collect();
+        let mut pending = lock(&self.inner.pending_pr);
+        for key in &take { pending.remove(key); }
+        take
+    }
+
+    /// Store one batch. The revision moves only when some cached PR state
+    /// actually changed; the update names the changed URLs.
+    fn publish_pr_results(&self, results: Vec<(PrKey, PrLookup)>) {
         if results.is_empty() { return; }
+        let mut urls = HashSet::<String>::new();
+        let mut branches = Vec::<PrBranchKey>::new();
         let mut cache = lock(&self.inner.pr_cache);
-        for (key, data) in results { cache.insert(key, Entry { data, fetched_at: Instant::now() }); }
+        let mut retry = lock(&self.inner.pr_retry);
+        for (key, lookup) in results {
+            let new = match lookup {
+                PrLookup::Error => {
+                    // Keep the entry (and its fetched_at): unverified data must not look fresh.
+                    let attempts = retry.get(&key).map_or(0, |(attempts, _)| *attempts);
+                    let delay = mast_harness::backoff::jittered(mast_harness::backoff::delay_for_attempt(PR_RETRY_BASE, PR_RETRY_CEILING, attempts));
+                    retry.insert(key, (attempts.saturating_add(1), Instant::now() + delay));
+                    continue;
+                }
+                PrLookup::Found(status) => Some(status),
+                PrLookup::NotFound => None,
+            };
+            retry.remove(&key);
+            let old = cache.get(&key).and_then(|entry| entry.data.clone());
+            if old != new {
+                for status in [&old, &new].into_iter().flatten() {
+                    if let Some(url) = &status.url { urls.insert(url.clone()); }
+                }
+                match &key {
+                    PrKey::Url(url) => { urls.insert(url.clone()); }
+                    PrKey::Branch { cwd, branch } | PrKey::CheckoutBranch { cwd, branch } => {
+                        let key = PrBranchKey { cwd: cwd.to_string_lossy().into_owned(), branch: branch.clone() };
+                        if !branches.contains(&key) { branches.push(key); }
+                    }
+                }
+            }
+            cache.insert(key, Entry { data: new, fetched_at: Instant::now() });
+        }
+        drop(retry);
         drop(cache);
-        self.inner.pr_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
+        if urls.is_empty() && branches.is_empty() { return; }
+        let mut urls: Vec<String> = urls.into_iter().collect();
+        urls.sort();
+        self.inner.pr_revision.send_modify(|update| {
+            update.revision = update.revision.wrapping_add(1);
+            update.urls = urls;
+            update.branches = branches;
+        });
     }
 
     /// Refresh the "my open PRs" list if stale. Own TTL/cadence, separate
@@ -1170,31 +1293,52 @@ pub(crate) fn workspace_submodule_paths(root_cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-fn run_gh_pr_view(cwd: &Path, branch: &str) -> Option<Value> {
-    let output = gh_command()?
-        .args(["pr", "view", branch, "--json", PR_VIEW_JSON_FIELDS])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Outcome of one `gh pr view`.
+enum GhView {
+    Found(Value),
+    NotFound,
+    Error,
+}
+
+/// Tell "this PR does not exist" apart from a transient failure by gh's own words.
+fn gh_view_not_found(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    ["no pull requests found", "no pull request found", "could not resolve to a pullrequest", "http 404"]
+        .iter().any(|needle| stderr.contains(needle))
+}
+
+fn gh_view_result(output: std::io::Result<std::process::Output>) -> GhView {
+    let Ok(output) = output else { return GhView::Error; };
+    if output.status.success() {
+        return serde_json::from_slice(&output.stdout).map_or(GhView::Error, GhView::Found);
     }
-    serde_json::from_slice(&output.stdout).ok()
+    if gh_view_not_found(&String::from_utf8_lossy(&output.stderr)) { GhView::NotFound } else { GhView::Error }
+}
+
+fn run_gh_pr_view(cwd: &Path, branch: &str) -> GhView {
+    let Some(mut command) = gh_command() else { return GhView::Error; };
+    gh_view_result(command.args(["pr", "view", branch, "--json", PR_VIEW_JSON_FIELDS]).current_dir(cwd).output())
 }
 
 /// `fetch_github_pr` (`session_canvas_server.py:1505`): try `cwd` directly,
 /// then each `.gitmodules` submodule under it — confirmed in the reference
 /// implementation's own comments that a monorepo superproject root often has
 /// no PR for a branch that has a real, open one exactly one submodule down.
-fn fetch_github_pr(cwd: &Path, branch: &str) -> Option<PrStatus> {
-    let data = run_gh_pr_view(cwd, branch).or_else(|| {
-        workspace_submodule_paths(cwd)
-            .into_iter()
-            .map(|sub| cwd.join(sub))
-            .filter(|sub_cwd| sub_cwd.is_dir())
-            .find_map(|sub_cwd| run_gh_pr_view(&sub_cwd, branch))
-    })?;
-    Some(pr_json_to_status(&data))
+fn fetch_github_pr(cwd: &Path, branch: &str) -> PrLookup {
+    let mut errored = false;
+    match run_gh_pr_view(cwd, branch) {
+        GhView::Found(data) => return PrLookup::Found(pr_json_to_status(&data)),
+        GhView::Error => return PrLookup::Error,
+        GhView::NotFound => {}
+    }
+    for sub_cwd in workspace_submodule_paths(cwd).into_iter().map(|sub| cwd.join(sub)).filter(|sub_cwd| sub_cwd.is_dir()) {
+        match run_gh_pr_view(&sub_cwd, branch) {
+            GhView::Found(data) => return PrLookup::Found(pr_json_to_status(&data)),
+            GhView::Error => errored = true,
+            GhView::NotFound => {}
+        }
+    }
+    if errored { PrLookup::Error } else { PrLookup::NotFound }
 }
 
 /// PR detail resolved from a durable `linked_pr_url` (ticket 0xx) rather than
@@ -1202,16 +1346,13 @@ fn fetch_github_pr(cwd: &Path, branch: &str) -> Option<PrStatus> {
 /// [`fetch_github_pr`] — this needs no local checkout/cwd at all (the process
 /// still runs from SOME cwd, but `gh` resolves the target repo from the URL,
 /// not from where it happens to be invoked).
-fn fetch_github_pr_by_url(url: &str) -> Option<PrStatus> {
-    let output = gh_command()?
-        .args(["pr", "view", url, "--json", PR_VIEW_JSON_FIELDS])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn fetch_github_pr_by_url(url: &str) -> PrLookup {
+    let Some(mut command) = gh_command() else { return PrLookup::Error; };
+    match gh_view_result(command.args(["pr", "view", url, "--json", PR_VIEW_JSON_FIELDS]).output()) {
+        GhView::Found(data) => PrLookup::Found(pr_json_to_status(&data)),
+        GhView::NotFound => PrLookup::NotFound,
+        GhView::Error => PrLookup::Error,
     }
-    let data: Value = serde_json::from_slice(&output.stdout).ok()?;
-    Some(pr_json_to_status(&data))
 }
 
 /// `git_diff_stat` (`session_canvas_server.py:312-338`): uncommitted changes
@@ -1586,6 +1727,170 @@ mod tests {
         assert!(pr.action_reasons().is_empty());
     }
 
+    fn open_pr_for_test(url: &str) -> PrStatus {
+        PrStatus {
+            additions: None, deletions: None, merged_at: None, number: 7, url: Some(url.into()), state: "OPEN".into(),
+            is_draft: false, review_decision: None, reviewers: Vec::new(), checks: None, title: None, branch: None,
+            head_sha: None, mergeable: "mergeable".into(), has_reviewer_requested: false,
+        }
+    }
+
+    #[test]
+    fn expired_pr_link_keeps_its_last_known_state_and_queues_a_refresh() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        lock(&cache.inner.pr_cache).insert(PrKey::Url(url.into()), Entry {
+            data: Some(open_pr_for_test(url)),
+            fetched_at: Instant::now() - (CACHE_TTL + Duration::from_secs(60)),
+        });
+        let links = vec![mast_proto::ChatPrLink { url: url.into(), source: mast_proto::ChatLinkSource::CreatedInChat }];
+        let status = cache.status_for_chat_links(None, None, None, &links, None);
+        assert_eq!(status.pr_links[0].detail.as_ref().map(|pr| pr.state.as_str()), Some("OPEN"));
+        assert!(lock(&cache.inner.pending_pr).contains(&PrKey::Url(url.into())), "stale entry must be refreshed");
+        assert_eq!(cache.request_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("OPEN".into()));
+    }
+
+    fn age(cache: &PrTicketCache, key: &PrKey, by: Duration) {
+        lock(&cache.inner.pr_cache).get_mut(key).unwrap().fetched_at = Instant::now() - by;
+    }
+
+    #[test]
+    fn failed_lookup_keeps_the_entry_and_its_age_and_backs_off() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+        age(&cache, &key, CACHE_TTL + Duration::from_secs(5));
+        let before = lock(&cache.inner.pr_cache)[&key].fetched_at;
+        let revision = cache.watch_pr_revision().borrow().revision;
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Error)]);
+        assert_eq!(lock(&cache.inner.pr_cache)[&key].fetched_at, before, "a failure must not look like a fresh check");
+        assert_eq!(cache.watch_pr_revision().borrow().revision, revision);
+        assert!(cache.peek_pr_url(url).is_none(), "unverified data is not fresh");
+        lock(&cache.inner.pending_pr).clear();
+        cache.request_pr_url(url);
+        assert!(lock(&cache.inner.pending_pr).is_empty(), "backing off after a transient error");
+        lock(&cache.inner.pr_retry).clear();
+        cache.request_pr_url(url);
+        assert!(!lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn not_found_clears_a_known_pr_and_reports_the_url() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+        cache.publish_pr_results(vec![(key, PrLookup::NotFound)]);
+        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        assert_eq!(cache.watch_pr_revision().borrow().urls, vec![url.to_owned()]);
+    }
+
+    #[test]
+    fn gh_not_found_output_is_told_apart_from_transient_errors() {
+        assert!(gh_view_not_found("no pull requests found for branch \"x\""));
+        assert!(gh_view_not_found("GraphQL: Could not resolve to a PullRequest with the number of 9."));
+        assert!(!gh_view_not_found("error connecting to api.github.com"));
+        assert!(!gh_view_not_found("HTTP 401: Bad credentials"));
+    }
+
+    #[test]
+    fn a_no_change_publish_does_not_bump_the_revision() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+        let first = cache.watch_pr_revision().borrow().clone();
+        assert_eq!(first.urls, vec![url.to_owned()]);
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+        assert_eq!(*cache.watch_pr_revision().borrow(), first);
+        let mut merged = open_pr_for_test(url);
+        merged.state = "MERGED".into();
+        cache.publish_pr_results(vec![(key, PrLookup::Found(merged))]);
+        assert_eq!(cache.watch_pr_revision().borrow().revision, first.revision + 1);
+    }
+
+    #[test]
+    fn merged_entries_are_served_but_never_requeued() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        let mut merged = open_pr_for_test(url);
+        merged.state = "MERGED".into();
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(merged))]);
+        age(&cache, &key, STALE_PR_LIMIT + Duration::from_secs(60));
+        let links = vec![mast_proto::ChatPrLink { url: url.into(), source: mast_proto::ChatLinkSource::CreatedInChat }];
+        let status = cache.status_for_chat_links(None, None, None, &links, None);
+        assert_eq!(status.pr_links[0].detail.as_ref().map(|pr| pr.state.as_str()), Some("MERGED"));
+        assert_eq!(cache.request_pr_url(url).and_then(|pr| pr).map(|pr| pr.state), Some("MERGED".into()));
+        assert!(lock(&cache.inner.pending_pr).is_empty());
+    }
+
+    #[test]
+    fn a_merged_branch_lookup_is_rechecked_but_a_merged_url_is_not() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let mut merged = open_pr_for_test(url);
+        merged.state = "MERGED".into();
+        let key = PrKey::Branch { cwd: PathBuf::from("/tmp/repo-reuse"), branch: "reused".into() };
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(merged))]);
+        age(&cache, &key, CACHE_TTL + Duration::from_secs(5));
+        lock(&cache.inner.pending_pr).clear();
+        cache.status_for_chat_links(None, Some("/tmp/repo-reuse"), Some("reused"), &[], None);
+        assert!(lock(&cache.inner.pending_pr).contains(&key), "a reused branch can have a follow-up PR");
+    }
+
+    #[test]
+    fn a_changed_branch_lookup_is_published_by_checkout_and_branch() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/9";
+        let key = PrKey::Branch { cwd: PathBuf::from("/tmp/repo-a"), branch: "feature".into() };
+        cache.publish_pr_results(vec![(key, PrLookup::Found(open_pr_for_test(url)))]);
+        let update = cache.watch_pr_revision().borrow().clone();
+        assert_eq!(update.branches, vec![PrBranchKey { cwd: "/tmp/repo-a".into(), branch: "feature".into() }]);
+        assert_eq!(update.urls, vec![url.to_owned()]);
+    }
+
+    #[test]
+    fn open_data_is_not_served_after_a_day_without_a_check() {
+        let cache = PrTicketCache::new();
+        let url = "https://github.com/example/repo/pull/7";
+        let key = PrKey::Url(url.into());
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+        age(&cache, &key, STALE_PR_LIMIT + Duration::from_secs(60));
+        let links = vec![mast_proto::ChatPrLink { url: url.into(), source: mast_proto::ChatLinkSource::CreatedInChat }];
+        assert!(cache.status_for_chat_links(None, None, None, &links, None).pr_links[0].detail.is_none());
+        assert!(cache.request_pr_url(url).is_none());
+    }
+
+    #[test]
+    fn an_expired_inferred_pr_is_refreshed_even_with_durable_links() {
+        let cache = PrTicketCache::new();
+        let branch_pr = "https://github.com/example/repo/pull/8";
+        let key = PrKey::Branch { cwd: PathBuf::from("/tmp/repo-stack"), branch: "stack".into() };
+        cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(branch_pr)))]);
+        age(&cache, &key, CACHE_TTL + Duration::from_secs(5));
+        let links = vec![mast_proto::ChatPrLink { url: "https://github.com/example/repo/pull/7".into(), source: mast_proto::ChatLinkSource::Manual }];
+        lock(&cache.inner.pending_pr).clear();
+        let status = cache.status_for_chat_links(None, Some("/tmp/repo-stack"), Some("stack"), &links, None);
+        assert!(status.pr_links.iter().any(|link| link.url == branch_pr), "stale inferred PR is still shown");
+        assert!(lock(&cache.inner.pending_pr).contains(&key));
+    }
+
+    #[test]
+    fn pending_lookups_run_oldest_first() {
+        let cache = PrTicketCache::new();
+        let urls: Vec<String> = (1..=5).map(|n| format!("https://github.com/example/repo/pull/{n}")).collect();
+        for (index, url) in urls.iter().enumerate() {
+            let key = PrKey::Url(url.clone());
+            cache.publish_pr_results(vec![(key.clone(), PrLookup::Found(open_pr_for_test(url)))]);
+            age(&cache, &key, Duration::from_secs(1000 - index as u64 * 100));
+            lock(&cache.inner.pending_pr).insert(key);
+        }
+        let take = cache.take_pending_prs();
+        assert!(take == urls[..3].iter().map(|url| PrKey::Url(url.clone())).collect::<Vec<_>>());
+    }
+
     #[test]
     fn a_no_pr_result_is_not_re_asked_every_cache_ttl() {
         let cache = PrTicketCache::new();
@@ -1785,14 +2090,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr_cache_watch_emits_after_a_completed_batch() {
+    async fn pr_cache_watch_emits_after_a_batch_that_changed_something() {
         let cache = PrTicketCache::new();
         let mut revisions = cache.watch_pr_revision();
         let url = "https://github.com/example/repo/pull/1";
-        cache.publish_pr_results(vec![(PrKey::Url(url.into()), None)]);
+        cache.publish_pr_results(vec![(PrKey::Url(url.into()), PrLookup::Found(open_pr_for_test(url)))]);
         revisions.changed().await.unwrap();
-        assert_eq!(*revisions.borrow_and_update(), 1);
-        assert!(matches!(cache.peek_pr_url(url), Some(None)));
+        assert_eq!(revisions.borrow_and_update().revision, 1);
         cache.publish_pr_results(Vec::new());
         assert!(!revisions.has_changed().unwrap());
     }
@@ -2189,7 +2493,7 @@ mod tests {
         // path — that's covered by the fixture-based tests above.
         let cwd = std::env::current_dir().unwrap();
         let result = fetch_github_pr(&cwd, "this-branch-should-not-exist-anywhere");
-        assert!(result.is_none(), "a bogus branch must not fabricate a PR");
+        assert!(!matches!(result, PrLookup::Found(_)), "a bogus branch must not fabricate a PR");
     }
 
     fn sample_my_pr(number: u64, repo: &str) -> MyOpenPr {

@@ -140,6 +140,8 @@ pub(crate) use tabs::chat_identity_for;
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
 const CHAT_HEADER_LINK_REFRESH: Duration = Duration::from_secs(15);
+/// Link status replies landing within this window share one Tracker rebuild.
+const BOARD_LINKS_BATCH: Duration = Duration::from_millis(200);
 const CHAT_HEADER_METADATA_CLEARANCE: f32 = 52.0;
 
 struct ChatHeaderLinkCache {
@@ -743,6 +745,13 @@ pub struct Shell {
     board_links_revision: u64,
     board_links_generation: u64,
     board_link_versions: std::collections::HashMap<String, u64>,
+    /// Chats whose link status changed since the last Tracker rebuild; one
+    /// debounced flush bumps the revision for the whole batch.
+    board_links_dirty: std::collections::HashSet<String>,
+    /// Chats still owed a link status fetch, and those fetched from that set.
+    board_links_owed: std::collections::HashSet<String>,
+    board_links_requested: std::collections::HashSet<String>,
+    board_links_flush: Option<Task<()>>,
     chat_header_links_pending: std::collections::HashSet<String>,
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
     /// it belongs to.
@@ -1238,6 +1247,10 @@ impl Shell {
             board_links_revision: 0,
             board_links_generation: 0,
             board_link_versions: Default::default(),
+            board_links_dirty: Default::default(),
+            board_links_owed: Default::default(),
+            board_links_requested: Default::default(),
+            board_links_flush: None,
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
             running: running_ui::RunningUi::new(
@@ -2063,7 +2076,9 @@ impl Shell {
                 .await;
             this.update(cx, |this, cx| {
                 this.chat_header_links_pending.remove(&chat_id);
+                let owed_fetch = this.board_links_requested.remove(&chat_id);
                 if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    if owed_fetch { this.top_up_board_links(cx); }
                     cx.notify();
                     return;
                 }
@@ -2076,21 +2091,19 @@ impl Shell {
                         &chat_id,
                         &crate::review_chats::links_of_status(&status),
                     );
-                    this.board_links_revision = this.board_links_revision.wrapping_add(1);
-                    this.board_link_versions.insert(chat_id.clone(), this.board_links_revision);
+                    let changed = this.chat_header_links.get(&chat_id)
+                        .is_none_or(|entry| entry.checkout != checkout || entry.status.as_ref() != Some(&status));
                     this.chat_header_links.insert(
-                        chat_id,
+                        chat_id.clone(),
                         ChatHeaderLinkCache {
                             checkout,
                             status: Some(status),
                             fetched_at: Instant::now(),
                         },
                     );
-                    if this.right_pane_open(cx) && this.resolved_right_active(cx) == RightSurface::Team {
-                        let active_chat = this.active_chat.clone();
-                        this.load_tracker_health(&active_chat, cx);
-                    }
+                    if changed { this.mark_board_links_dirty(chat_id, cx); }
                 }
+                if owed_fetch { this.top_up_board_links(cx); }
                 cx.notify();
             })
             .ok();
@@ -2102,6 +2115,57 @@ impl Shell {
     pub(crate) fn cached_review_head(&self, chat_id: &str, pr: &mast_proto::ReviewPullRequest) -> Option<String> {
         let status = self.chat_header_links.get(chat_id)?.status.as_ref()?;
         crate::artifacts::model::cached_review_head(status, pr).map(str::to_owned)
+    }
+
+    /// Make the link statuses a PR cache update touched due for a refetch,
+    /// without dropping what is shown meanwhile. `None` (an update that does
+    /// not say what changed) expires everything.
+    pub(crate) fn expire_chat_header_links(&mut self, update: Option<&mast_engine::pr_ticket_cache::PrCacheUpdate>, cx: &App) {
+        let Some(stale) = Instant::now().checked_sub(CHAT_HEADER_LINK_REFRESH + Duration::from_secs(1)) else { return; };
+        let state = self.state.read(cx);
+        for (id, entry) in self.chat_header_links.iter_mut() {
+            let touched = match (update, entry.status.as_ref()) {
+                (None, _) | (_, None) => true,
+                (Some(update), Some(status)) => {
+                    let urls = status.pr_links.iter().map(|link| link.url.as_str()).chain(status.pr.iter().filter_map(|pr| pr.url.as_deref()));
+                    urls.clone().any(|url| update.urls.iter().any(|changed| changed.eq_ignore_ascii_case(url)))
+                        || (!update.branches.is_empty() && {
+                            let chat = state.chats.iter().find(|chat| &chat.id == id);
+                            let on_changed = |cwd: &str, branch: &str| update.branches.iter().any(|key| key.cwd == cwd && key.branch == branch);
+                            chat.is_some_and(|chat| chat.cwd.as_deref().zip(chat.branch.as_deref()).is_some_and(|(cwd, branch)| on_changed(cwd, branch)))
+                                || entry.checkout.as_ref().is_some_and(|(path, _, branch)| branch.as_deref().is_some_and(|branch| on_changed(path, branch)))
+                        })
+                }
+            };
+            if touched { entry.fetched_at = stale; self.board_links_owed.insert(id.clone()); }
+        }
+    }
+
+    /// A chat's link status changed: rebuild the Tracker once for the whole
+    /// batch of replies that land in the next moment.
+    fn mark_board_links_dirty(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.board_links_dirty.insert(chat_id);
+        if self.board_links_flush.is_some() { return; }
+        self.board_links_flush = Some(cx.spawn(async move |shell, cx| {
+            cx.background_executor().timer(BOARD_LINKS_BATCH).await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.board_links_flush = None;
+                shell.flush_board_links(cx);
+            });
+        }));
+    }
+
+    fn flush_board_links(&mut self, cx: &mut Context<Self>) {
+        if self.board_links_dirty.is_empty() { return; }
+        self.board_links_revision = self.board_links_revision.wrapping_add(1);
+        for id in std::mem::take(&mut self.board_links_dirty) {
+            self.board_link_versions.insert(id, self.board_links_revision);
+        }
+        if self.right_pane_open(cx) && self.resolved_right_active(cx) == RightSurface::Team {
+            let active_chat = self.active_chat.clone();
+            self.load_tracker_health(&active_chat, cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn invalidate_chat_header_links(&mut self, chat_id: &str) {

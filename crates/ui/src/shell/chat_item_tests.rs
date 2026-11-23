@@ -1259,6 +1259,225 @@ fn tracker_places_an_unassigned_item_with_a_pr_in_its_pr_stage(cx: &mut TestAppC
     assert!(has(vcx, "tracker-stage-Ready to merge-true"));
 }
 
+fn link_status_with_pr(state: &str) -> mast_engine::pr_ticket_cache::ChatLinkStatus {
+    let pr = serde_json::json!({"number": 57, "url": "https://github.com/example/project/pull/57", "state": state,
+        "isDraft": false, "reviewers": [], "mergeable": "mergeable", "hasReviewerRequested": false});
+    serde_json::from_value(serde_json::json!({ "isWorktree": false, "pr": pr,
+        "prLinks": [{"url": "https://github.com/example/project/pull/57", "source": "created_in_chat", "detail": pr}] })).unwrap()
+}
+
+fn pr_update(urls: &[&str]) -> mast_engine::pr_ticket_cache::PrCacheUpdate {
+    mast_engine::pr_ticket_cache::PrCacheUpdate { revision: 1, urls: urls.iter().map(|url| (*url).to_owned()).collect(), branches: Vec::new() }
+}
+
+const PR_57: &str = "https://github.com/example/project/pull/57";
+
+fn stage_counts(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> [usize; 6] {
+    shell.read_with(vcx, |shell, _| shell.tracker.counts)
+}
+
+#[gpui::test]
+fn a_pr_cache_update_refetches_the_chats_link_status_and_moves_its_stage(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage as Stage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
+    add_workers(&shell, vcx, 1);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let building = stage_counts(&shell, vcx);
+    assert!(building[Stage::Building.index()] >= 1, "{building:?}");
+
+    // The engine's PR cache now knows the chat's PR is open: the Tracker must
+    // ask for the chat's link status again, then show the new stage.
+    let mut answer = |vcx: &mut VisualTestContext, state: &str| {
+        let request = loop {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+            let Ok(line) = requests.try_recv() else { panic!("no link status refetch was requested") };
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] == mast_rpc::methods::CHAT_LINK_STATUS && request["params"]["chatId"] == "w-0" { break request; }
+        };
+        replies.try_send(serde_json::json!({"id": request["id"], "ok": link_status_with_pr(state)}).to_string()).unwrap();
+        for _ in 0..20 {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+        }
+        vcx.executor().advance_clock(Duration::from_millis(500));
+        vcx.run_until_parked();
+        draw(vcx);
+    };
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, None, cx));
+    draw(vcx);
+    answer(vcx, "OPEN");
+    let mut expected = building;
+    expected[Stage::Building.index()] -= 1;
+    expected[Stage::PrReview.index()] += 1;
+    assert_eq!(stage_counts(&shell, vcx), expected, "an open PR moves the ticket to PR review");
+
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx));
+    draw(vcx);
+    answer(vcx, "MERGED");
+    expected[Stage::PrReview.index()] -= 1;
+    expected[Stage::Done.index()] += 1;
+    assert_eq!(stage_counts(&shell, vcx), expected, "a merged PR moves the ticket to Done");
+    drop(guard);
+}
+
+#[gpui::test]
+fn a_pr_cache_update_expires_only_the_chats_it_touches(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 3);
+    let other = "https://github.com/example/project/pull/58";
+    shell.update(vcx, |shell, cx| {
+        let unlinked = mast_engine::pr_ticket_cache::ChatLinkStatus::default();
+        for (id, status) in [("w-0", link_status_with_pr("OPEN")), ("w-1", {
+            let mut status = link_status_with_pr("OPEN");
+            for link in &mut status.pr_links { link.url = other.into(); }
+            status.pr.as_mut().unwrap().url = Some(other.into());
+            status
+        }), ("w-2", unlinked)] {
+            shell.chat_header_links.insert(id.into(), ChatHeaderLinkCache { checkout: None, status: Some(status), fetched_at: Instant::now() });
+        }
+        let ids: Vec<String> = ["w-0", "w-1", "w-2"].map(String::from).to_vec();
+        assert!(shell.board_links_due(&ids, cx).is_empty());
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx);
+        assert_eq!(shell.board_links_due(&ids, cx), vec!["w-0"], "only the chat linked to the changed PR is due");
+        shell.chat_header_links.get_mut("w-2").unwrap().checkout = Some(("/repo/w-2".into(), "w2".into(), Some("feature/w-2".into())));
+        let mut update = pr_update(&[]);
+        update.branches = vec![mast_engine::pr_ticket_cache::PrBranchKey { cwd: "/repo/w-2".into(), branch: "feature/w-2".into() }];
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&update), cx);
+        let mut due = shell.board_links_due(&ids, cx);
+        due.sort();
+        assert_eq!(due, vec!["w-0", "w-2"], "a branch change reaches only the chats on that branch, not every chat without a PR");
+    });
+}
+
+#[gpui::test]
+fn a_large_tracker_refetches_every_due_chat_without_an_unrelated_rebuild(cx: &mut TestAppContext) {
+    use crate::tracker_lifecycle::LifecycleStage as Stage;
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
+    add_workers(&shell, vcx, 20);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // Statuses already known and unchanged: their refetch replies must not rely on a rebuild to continue.
+    shell.update(vcx, |shell, _| for i in 0..20 {
+        shell.chat_header_links.get_mut(&format!("w-{i}")).unwrap().status = Some(Default::default());
+    });
+    let building = stage_counts(&shell, vcx);
+    shell.update(vcx, |shell, cx| shell.on_tracker_pr_cache_changed(CHAT_API, None, cx));
+    draw(vcx);
+    // Answer every link status request; only the last chat to be asked has a PR.
+    let mut asked = std::collections::HashSet::new();
+    let mut idle_rounds = 0;
+    while idle_rounds < 5 {
+        runtime.block_on(tokio::task::yield_now());
+        vcx.run_until_parked();
+        let mut got = false;
+        while let Ok(line) = requests.try_recv() {
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if request["method"] != mast_rpc::methods::CHAT_LINK_STATUS { continue; }
+            got = true;
+            let chat = request["params"]["chatId"].as_str().unwrap().to_owned();
+            let status = if chat == "w-19" { link_status_with_pr("OPEN") } else { mast_engine::pr_ticket_cache::ChatLinkStatus::default() };
+            asked.insert(chat);
+            replies.try_send(serde_json::json!({"id": request["id"], "ok": status}).to_string()).unwrap();
+        }
+        idle_rounds = if got { 0 } else { idle_rounds + 1 };
+        vcx.executor().advance_clock(Duration::from_millis(500));
+    }
+    draw(vcx);
+    let missing: Vec<_> = (0..20).map(|i| format!("w-{i}")).filter(|id| !asked.contains(id)).collect();
+    assert!(missing.is_empty(), "every due chat is refetched, not just the first 8; missing {missing:?}");
+    let mut expected = building;
+    expected[Stage::Building.index()] -= 1;
+    expected[Stage::PrReview.index()] += 1;
+    assert_eq!(stage_counts(&shell, vcx), expected, "the last chat reaches PR review");
+    drop(guard);
+}
+
+#[gpui::test]
+fn the_active_chats_header_refetch_does_not_refetch_other_tracker_chats(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
+    add_workers(&shell, vcx, 12);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // Everything the Tracker wanted on open has been fetched and answered.
+    let mut asked_chats = |vcx: &mut VisualTestContext, answer: bool| {
+        let mut asked = Vec::new();
+        for _ in 0..6 {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+            while let Ok(line) = requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if request["method"] != mast_rpc::methods::CHAT_LINK_STATUS { continue; }
+                asked.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+                if answer {
+                    replies.try_send(serde_json::json!({"id": request["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string()).unwrap();
+                }
+            }
+            vcx.executor().advance_clock(Duration::from_millis(500));
+        }
+        asked
+    };
+    asked_chats(vcx, true);
+    // Time passes: every cached status is older than the 15 s refresh, and the
+    // active chat's header refetches its own status, as it does while streaming.
+    shell.update(vcx, |shell, cx| {
+        shell.chat_header_links.insert(CHAT_API.into(), ChatHeaderLinkCache { checkout: None, status: Some(Default::default()), fetched_at: Instant::now() });
+        for entry in shell.chat_header_links.values_mut() { entry.status = Some(Default::default()); }
+        for entry in shell.chat_header_links.values_mut() { entry.fetched_at = Instant::now() - Duration::from_secs(60); }
+        shell.ensure_chat_header_links(CHAT_API.into(), cx);
+    });
+    let asked = asked_chats(vcx, true);
+    assert_eq!(asked, vec![CHAT_API.to_owned()], "no other Tracker chat is refetched without a PR cache update");
+    // A PR cache update that touches one chat refetches that chat only.
+    shell.update(vcx, |shell, cx| {
+        for entry in shell.chat_header_links.values_mut() { entry.fetched_at = Instant::now(); }
+        shell.chat_header_links.get_mut("w-3").unwrap().status = Some(link_status_with_pr("OPEN"));
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx);
+    });
+    draw(vcx);
+    let asked = asked_chats(vcx, true);
+    assert_eq!(asked, vec!["w-3".to_owned()]);
+    drop(guard);
+}
+
+#[gpui::test]
+fn a_batch_of_link_status_changes_rebuilds_the_tracker_once(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    add_workers(&shell, vcx, 3);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    let (revision, rebuilds) = shell.read_with(vcx, |shell, _| (shell.board_links_revision, shell.tracker.rebuilds));
+    shell.update(vcx, |shell, cx| {
+        for id in ["w-0", "w-1", "w-2"] { shell.mark_board_links_dirty(id.into(), cx); }
+    });
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    vcx.run_until_parked();
+    draw(vcx);
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.board_links_revision, revision.wrapping_add(1), "one revision bump for the batch");
+        assert_eq!(shell.tracker.rebuilds, rebuilds + 1);
+    });
+}
+
 #[gpui::test]
 fn tracker_keeps_items_whose_only_chat_is_archived(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
