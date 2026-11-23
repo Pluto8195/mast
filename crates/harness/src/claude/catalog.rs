@@ -101,6 +101,27 @@ pub fn native_million_context(id: &str) -> bool {
     .contains(&id)
 }
 
+/// The 200K/1M context-window select carried by the long-context models. The
+/// 1M window is selected via a model-id suffix (`<model>[1m]`), exactly how the
+/// CLI itself does it.
+pub(crate) fn context_window() -> ModelOption {
+    ModelOption {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices: vec![
+            ModelOptionChoice {
+                id: "200k".into(),
+                label: "200K".into(),
+            },
+            ModelOptionChoice {
+                id: "1m".into(),
+                label: "1M".into(),
+            },
+        ],
+        default_choice: "200k".into(),
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
