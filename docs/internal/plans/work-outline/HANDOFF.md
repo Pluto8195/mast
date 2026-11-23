@@ -1221,6 +1221,19 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-23 afternoon; coordinator 9ca67830)
+
+- **Installed: release 118** (56e798600); Mikey to restart. 117 backed up as
+  `~/zeron-dev-app-backups/mast-release117-3b66d9ad3`. Release tests vs 3b66d9ad3: nextest 2075/2075, UI 2940/0. Soak vs
+  117: CPU 9.8 vs 8.8 % (machine busier; under the 1.5× gate), steady 0.6 vs 0.6 %, footprint 559 vs 602 MB, growth −37 MB.
+  - **Context window fix** (fix/context-window, Terra):
+    - The 200K/1M option is gone for 1M-native Claude models (`catalog::native_million_context`). A saved
+      `contextWindow` on those models is ignored.
+    - Overview and sidebar meters divide by the recorded window (200k only as the fallback).
+    - The composer's context indicator has its own gated observer, and the hover card reads the same value.
+    - Unresolved: Mikey saw a 36% ring while the card said 183,925 / 1,000,000 (18%). It isn't staleness, and
+      modelUsage picks the main model. Ask for a screenshot of both together if it recurs.
+
 ## In flight (snapshot 2026-11-23 11:50; coordinator 9ca67830)
 
 - **Installed: release 117** (3b66d9ad3) at ~11:50; Mikey to restart. 116 backed up as
