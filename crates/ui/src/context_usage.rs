@@ -6,11 +6,7 @@ use gpui::{
 };
 use mast_proto::ContextUsage;
 
-pub fn render(
-    usage: Option<ContextUsage>,
-    state: gpui::Entity<crate::state::AppState>,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+pub fn render(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
     let industrial = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
     let display_text = theme.text_muted;
@@ -22,7 +18,11 @@ pub fn render(
         Some(_) => theme.text_muted,
         None => theme.text_faint,
     };
-    let track = if industrial { display_text.opacity(0.25) } else { theme.text_faint.opacity(0.25) };
+    let track = if industrial {
+        display_text.opacity(0.25)
+    } else {
+        theme.text_faint.opacity(0.25)
+    };
     let ring = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -73,25 +73,11 @@ pub fn render(
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
         .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
-            cx.new(|cx| UsageCard {
-                // The card shows only `context_usage`; repaint when it moves.
-                seen: crate::observe_gate::ObserveGate::seeded(state.read(cx).context_usage),
-                _subscription: cx.observe(&state, |this: &mut UsageCard, state, cx| {
-                    if this.seen.changed(state.read(cx).context_usage) {
-                        cx.notify();
-                    }
-                }),
-                state: state.clone(),
-            })
-            .into()
-        })
+        .tooltip(move |_, cx| cx.new(|_| UsageCard { usage }).into())
 }
 
 struct UsageCard {
-    state: gpui::Entity<crate::state::AppState>,
-    seen: crate::observe_gate::ObserveGate<Option<ContextUsage>>,
-    _subscription: gpui::Subscription,
+    usage: Option<ContextUsage>,
 }
 
 fn with_separators(count: u64) -> String {
@@ -169,9 +155,7 @@ impl Render for UsageCard {
                     .line_height(px(19.0))
                     .whitespace_nowrap()
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(details(
-                        self.state.read(cx).context_usage,
-                    ))),
+                    .child(SharedString::from(details(self.usage))),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
     }

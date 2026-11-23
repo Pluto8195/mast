@@ -1194,11 +1194,8 @@ impl Pickers {
     /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
         if let Some(chat) = self.chat_row(cx) {
-            return chat
-                .config
-                .as_ref()
-                .map(|c| c.model_options.clone())
-                .unwrap_or_default();
+            let options = chat.config.as_ref().map(|c| c.model_options.clone()).unwrap_or_default();
+            return self.selected_model(cx).map_or(options.clone(), |model| offered_options(model, options));
         }
         let Some(harness) = self.effective_harness(cx) else {
             return Default::default();
@@ -5807,6 +5804,9 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                         default_choice: "1m".into(),
                     });
                 }
+            }
+            if harness == HarnessId::ClaudeCode && mast_harness::claude::catalog::native_million_context(&model.id) {
+                model.options.retain(|option| option.id != "contextWindow");
             }
             if let Some(label) = curated_label(&model.id) {
                 model.label = label;

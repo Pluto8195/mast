@@ -310,7 +310,7 @@ impl ClaudeHarness {
             );
         }
         if let Some(model) = &model {
-            let one_m = request
+            let one_m = !catalog::native_million_context(model) && request
                 .model_options
                 .get("contextWindow")
                 .and_then(Value::as_str)

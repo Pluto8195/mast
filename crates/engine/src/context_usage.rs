@@ -34,16 +34,8 @@
 //!    never parses the file front-to-back — it reads backward from EOF in
 //!    growing chunks until it finds one qualifying line or gives up.
 //!
-//! Both paths compute the SAME fixed-percentage formula as the reference
-//! tool: `min((input+cache_read+cache_creation)/200_000, 1.0)` — a FIXED
-//! 200k divisor regardless of the model's real advertised context window
-//! (the reference documents this as a deliberate approximation, not a bug).
-//! This deliberately does NOT reuse `mast_proto::ContextUsage::fraction()`,
-//! which divides by the model's REAL window when known (a more accurate
-//! number, appropriate for the composer's own meter) — parity with the
-//! reference overview wants the same fixed approximation on both the live
-//! and fallback paths here, not a more-accurate number on one and the fixed
-//! one on the other.
+//! Live usage uses the recorded context window. When no window is recorded,
+//! including transcript-tail fallback, the divisor defaults to 200,000 tokens.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -63,14 +55,14 @@ use crate::external_import::ExternalSessionImporter;
 use crate::managed_accounts::ManagedAccounts;
 use crate::workspace_host::WorkspaceHost;
 
-/// Fixed context-window divisor, matching `session_canvas_server.py`'s
-/// `CONTEXT_WINDOW_TOKENS = 200_000` (server.py:58) — see the module doc
-/// comment for why this is fixed rather than the model's real window.
+/// Default context window when the session does not report one.
 pub const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
-/// `context_pct_from_usage` (server.py:270-278): `min(tokens/200_000, 1.0)`.
-pub fn pct_from_tokens(tokens: u64) -> f32 {
-    (tokens as f64 / CONTEXT_WINDOW_TOKENS as f64).min(1.0) as f32
+pub fn pct_from_tokens(tokens: u64, window: Option<u64>) -> f32 {
+    let window = window
+        .filter(|window| *window > 0)
+        .unwrap_or(CONTEXT_WINDOW_TOKENS);
+    (tokens as f64 / window as f64).min(1.0) as f32
 }
 
 /// Backward tail-read starting window and hard cap — see
@@ -196,10 +188,11 @@ impl ContextUsageProvider {
             return Ok(None); // corrupt/partial snapshot — not fatal here
         }
         let doc = SessionDoc::from_doc(loro);
-        Ok(doc
-            .context_usage()
-            .and_then(|usage| usage.tokens)
-            .map(pct_from_tokens))
+        Ok(doc.context_usage().and_then(|usage| {
+            usage
+                .tokens
+                .map(|tokens| pct_from_tokens(tokens, usage.window))
+        }))
     }
 
     /// Fallback path's transcript resolution when the chat never went
@@ -324,12 +317,12 @@ impl ContextUsageProvider {
             if let Some(entry) = cache.get(path)
                 && entry.mtime == mtime
             {
-                return entry.tokens.map(pct_from_tokens);
+                return entry.tokens.map(|tokens| pct_from_tokens(tokens, None));
             }
         }
         let tokens = tail_last_assistant_usage_tokens(path);
         lock(&self.inner.tail_cache).insert(path.to_path_buf(), TailEntry { mtime, tokens });
-        tokens.map(pct_from_tokens)
+        tokens.map(|tokens| pct_from_tokens(tokens, None))
     }
 }
 
@@ -439,12 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn pct_from_tokens_is_fixed_200k_and_caps_at_one() {
-        assert_eq!(pct_from_tokens(0), 0.0);
-        assert_eq!(pct_from_tokens(100_000), 0.5);
-        assert_eq!(pct_from_tokens(200_000), 1.0);
+    fn pct_from_tokens_uses_window_and_caps_at_one() {
+        assert_eq!(pct_from_tokens(60_000, Some(1_000_000)), 0.06);
+        assert_eq!(pct_from_tokens(0, None), 0.0);
+        assert_eq!(pct_from_tokens(100_000, None), 0.5);
+        assert_eq!(pct_from_tokens(200_000, None), 1.0);
         assert_eq!(
-            pct_from_tokens(400_000),
+            pct_from_tokens(400_000, None),
             1.0,
             "must cap at 1.0, never exceed it"
         );
@@ -618,7 +612,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         write(&path, &assistant_line(1000));
 
-        assert_eq!(provider.tail_pct(&path), Some(pct_from_tokens(1000)));
+        assert_eq!(provider.tail_pct(&path), Some(pct_from_tokens(1000, None)));
         assert_eq!(lock(&provider.inner.tail_cache).len(), 1);
 
         // Same mtime (file untouched): a cache-poisoning direct overwrite of
@@ -640,7 +634,7 @@ mod tests {
         let future = SystemTime::now() + std::time::Duration::from_secs(5);
         let file = File::open(&path).unwrap();
         file.set_modified(future).ok();
-        assert_eq!(provider.tail_pct(&path), Some(pct_from_tokens(2000)));
+        assert_eq!(provider.tail_pct(&path), Some(pct_from_tokens(2000, None)));
     }
 
     #[test]
@@ -663,11 +657,9 @@ mod tests {
             .unwrap();
 
         let provider = ContextUsageProvider::new(store);
-        // Fixed 200k divisor, NOT the doc's own recorded 1_000_000 window —
-        // the whole point of not reusing `ContextUsage::fraction()`.
         assert_eq!(
             provider.live_pct(chat_id).unwrap(),
-            Some(pct_from_tokens(60_000))
+            Some(pct_from_tokens(60_000, Some(1_000_000)))
         );
     }
 

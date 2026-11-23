@@ -2251,7 +2251,7 @@ impl Render for Composer {
             });
             let usage = self.state.read(cx).context_usage;
             let usage = (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage)).then(||
-                crate::context_usage::render(usage, self.state.clone(), &theme).into_any_element());
+                crate::context_usage::render(usage, &theme).into_any_element());
             container.child(crate::components::conversation_footer_slot(
                 SESSION_FOOTER_HEIGHT, bottom_slot, new_thread_chrome_opacity, session_chrome_opacity,
                 new_thread_git_selectors.map(|el| el.into_any_element()),
