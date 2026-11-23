@@ -1016,20 +1016,30 @@ impl Shell {
         ids.iter().filter_map(|id| Some((id.clone(), self.chat_header_links.get(id)?.status.clone()?))).collect()
     }
 
-    pub(super) fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
+    fn board_links_due_all(&self, ids: &[String], cx: &App) -> Vec<String> {
         ids.iter().filter(|id| {
             let checkout = self.state.read(cx).selected_checkout_key(id);
             !self.chat_header_links_pending.contains(*id) && !self.chat_header_links.get(*id).is_some_and(|entry| entry.checkout == checkout && entry.fetched_at.elapsed() < CHAT_HEADER_LINK_REFRESH)
-        }).take(8usize.saturating_sub(self.chat_header_links_pending.len())).cloned().collect()
+        }).cloned().collect()
     }
 
-    /// After a link status reply: fetch the next due chats (still at most 8 in
-    /// flight) while the Tracker is visible, so a large Tracker is not left
-    /// waiting for an unrelated rebuild.
+    pub(super) fn board_links_due(&self, ids: &[String], cx: &App) -> Vec<String> {
+        let mut due = self.board_links_due_all(ids, cx);
+        due.truncate(8usize.saturating_sub(self.chat_header_links_pending.len()));
+        due
+    }
+
+    /// Fetch the chats this Tracker still owes a link status (filled only by a
+    /// rebuild's due scan and by PR cache updates), at most 8 in flight. It
+    /// never polls: nothing is owed unless one of those two put it there.
     pub(crate) fn top_up_board_links(&mut self, cx: &mut Context<Self>) {
-        if self.tracker.link_ids.is_empty() || !self.right_pane_open(cx) || self.resolved_right_active(cx) != RightSurface::Team { return; }
-        let ids = self.tracker.link_ids.clone();
-        for id in self.board_links_due(&ids, cx) { self.ensure_chat_header_links(id, cx); }
+        let capacity = 8usize.saturating_sub(self.chat_header_links_pending.len());
+        let next: Vec<String> = self.board_links_owed.iter().take(capacity).cloned().collect();
+        for id in next {
+            self.board_links_owed.remove(&id);
+            self.ensure_chat_header_links(id.clone(), cx);
+            if self.chat_header_links_pending.contains(&id) { self.board_links_requested.insert(id); }
+        }
     }
 
     pub(crate) fn request_board_links(&mut self, ids: &[String], cx: &mut Context<Self>) {
@@ -1568,7 +1578,9 @@ impl Shell {
         let shell = cx.weak_entity();
         cx.defer(move |cx| {
             let _ = shell.update(cx, |shell, cx| {
-                for id in shell.board_links_due(&ids, cx) { shell.ensure_chat_header_links(id, cx); }
+                let due = shell.board_links_due_all(&ids, cx);
+                shell.board_links_owed.extend(due);
+                shell.top_up_board_links(cx);
                 if shell.tracker.review_generation != generation { return; }
                 shell.tracker.review_task = Some(cx.spawn(async move |shell, cx| {
                     for (target, head) in review_targets {

@@ -1407,6 +1407,59 @@ fn a_large_tracker_refetches_every_due_chat_without_an_unrelated_rebuild(cx: &mu
 }
 
 #[gpui::test]
+fn the_active_chats_header_refetch_does_not_refetch_other_tracker_chats(cx: &mut TestAppContext) {
+    let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+    let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+    let engine = crate::state::EngineHandle::from_test_client(mast_rpc::RpcClient::new(out, inbound));
+    shell.update(vcx, |shell, cx| shell.state.update(cx, |state, _| state.set_test_engine(engine)));
+    add_workers(&shell, vcx, 12);
+    shell.update(vcx, |shell, cx| shell.open_team_tab(cx));
+    draw(vcx);
+    // Everything the Tracker wanted on open has been fetched and answered.
+    let mut asked_chats = |vcx: &mut VisualTestContext, answer: bool| {
+        let mut asked = Vec::new();
+        for _ in 0..6 {
+            runtime.block_on(tokio::task::yield_now());
+            vcx.run_until_parked();
+            while let Ok(line) = requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if request["method"] != mast_rpc::methods::CHAT_LINK_STATUS { continue; }
+                asked.push(request["params"]["chatId"].as_str().unwrap().to_owned());
+                if answer {
+                    replies.try_send(serde_json::json!({"id": request["id"], "ok": mast_engine::pr_ticket_cache::ChatLinkStatus::default()}).to_string()).unwrap();
+                }
+            }
+            vcx.executor().advance_clock(Duration::from_millis(500));
+        }
+        asked
+    };
+    asked_chats(vcx, true);
+    // Time passes: every cached status is older than the 15 s refresh, and the
+    // active chat's header refetches its own status, as it does while streaming.
+    shell.update(vcx, |shell, cx| {
+        shell.chat_header_links.insert(CHAT_API.into(), ChatHeaderLinkCache { checkout: None, status: Some(Default::default()), fetched_at: Instant::now() });
+        for entry in shell.chat_header_links.values_mut() { entry.status = Some(Default::default()); }
+        for entry in shell.chat_header_links.values_mut() { entry.fetched_at = Instant::now() - Duration::from_secs(60); }
+        shell.ensure_chat_header_links(CHAT_API.into(), cx);
+    });
+    let asked = asked_chats(vcx, true);
+    assert_eq!(asked, vec![CHAT_API.to_owned()], "no other Tracker chat is refetched without a PR cache update");
+    // A PR cache update that touches one chat refetches that chat only.
+    shell.update(vcx, |shell, cx| {
+        for entry in shell.chat_header_links.values_mut() { entry.fetched_at = Instant::now(); }
+        shell.chat_header_links.get_mut("w-3").unwrap().status = Some(link_status_with_pr("OPEN"));
+        shell.on_tracker_pr_cache_changed(CHAT_API, Some(&pr_update(&[PR_57])), cx);
+    });
+    draw(vcx);
+    let asked = asked_chats(vcx, true);
+    assert_eq!(asked, vec!["w-3".to_owned()]);
+    drop(guard);
+}
+
+#[gpui::test]
 fn a_batch_of_link_status_changes_rebuilds_the_tracker_once(cx: &mut TestAppContext) {
     let (shell, vcx) = mount(cx, CHAT_API, true, |_| {});
     add_workers(&shell, vcx, 3);

@@ -748,6 +748,9 @@ pub struct Shell {
     /// Chats whose link status changed since the last Tracker rebuild; one
     /// debounced flush bumps the revision for the whole batch.
     board_links_dirty: std::collections::HashSet<String>,
+    /// Chats still owed a link status fetch, and those fetched from that set.
+    board_links_owed: std::collections::HashSet<String>,
+    board_links_requested: std::collections::HashSet<String>,
     board_links_flush: Option<Task<()>>,
     chat_header_links_pending: std::collections::HashSet<String>,
     /// The header's hover context card (show / hide / ⌥⌘I pin) and the chat
@@ -1245,6 +1248,8 @@ impl Shell {
             board_links_generation: 0,
             board_link_versions: Default::default(),
             board_links_dirty: Default::default(),
+            board_links_owed: Default::default(),
+            board_links_requested: Default::default(),
             board_links_flush: None,
             chat_header_links_pending: Default::default(),
             chat_item_card: Default::default(),
@@ -2071,7 +2076,9 @@ impl Shell {
                 .await;
             this.update(cx, |this, cx| {
                 this.chat_header_links_pending.remove(&chat_id);
+                let owed_fetch = this.board_links_requested.remove(&chat_id);
                 if this.state.read(cx).selected_checkout_key(&chat_id) != checkout {
+                    if owed_fetch { this.top_up_board_links(cx); }
                     cx.notify();
                     return;
                 }
@@ -2095,8 +2102,8 @@ impl Shell {
                         },
                     );
                     if changed { this.mark_board_links_dirty(chat_id, cx); }
-                    this.top_up_board_links(cx);
                 }
+                if owed_fetch { this.top_up_board_links(cx); }
                 cx.notify();
             })
             .ok();
@@ -2130,7 +2137,7 @@ impl Shell {
                         })
                 }
             };
-            if touched { entry.fetched_at = stale; }
+            if touched { entry.fetched_at = stale; self.board_links_owed.insert(id.clone()); }
         }
     }
 
