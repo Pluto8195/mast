@@ -51,8 +51,7 @@ async fn reads_a_live_doc_stamped_context_usage() {
         .context_pct_for_chat(&core.workspace, &core.external_import, chat_id)
         .expect("context pct")
         .expect("must resolve from the live doc stamp");
-    // Fixed 200k divisor, NOT the doc's own recorded 1_000_000 window.
-    assert_eq!(pct, pct_from_tokens(60_000));
+    assert_eq!(pct, pct_from_tokens(60_000, Some(1_000_000)));
 
     core.shutdown().await;
 }
@@ -98,7 +97,7 @@ async fn falls_back_to_the_transcript_tail_for_an_externally_imported_chat() {
         .context_pct_for_chat(&core.workspace, &core.external_import, chat_id)
         .expect("context pct")
         .expect("must resolve from the transcript tail");
-    assert_eq!(pct, pct_from_tokens(500 + 2000 + 300));
+    assert_eq!(pct, pct_from_tokens(500 + 2000 + 300, None));
 
     core.shutdown().await;
 }
