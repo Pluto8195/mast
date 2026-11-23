@@ -81,6 +81,26 @@ fn toggle(id: &str, label: &str) -> ModelOption {
     }
 }
 
+/// Whether a Claude model has a native 1M context window.
+pub fn native_million_context(id: &str) -> bool {
+    let id = id.strip_suffix("[1m]").unwrap_or(id);
+    [
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-fable-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-haiku-5-5",
+    ]
+    .contains(&id)
+}
+
 /// The 200K/1M context-window select carried by the long-context models. The
 /// 1M window is selected via a model-id suffix (`<model>[1m]`), exactly how the
 /// CLI itself does it.
@@ -142,7 +162,7 @@ fn model(
 /// The curated model list, mirroring claude.ts's `claudeEffortsFor` /
 /// `claudeOptionsFor` ladders: full ladder (through ultracode/ultrathink) on
 /// Fable 5, `max`-topped ladders on Opus/Sonnet, no efforts but a thinking
-/// toggle on Haiku; context-window select on the long-context families and
+/// toggle on Haiku;
 /// fast mode on Opus 4.5+.
 ///
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
@@ -323,28 +343,28 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-5",
             "Opus 5",
             "Powerful model for complex work",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-4-8",
@@ -365,7 +385,7 @@ pub fn static_models() -> Vec<Model> {
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![],
         ),
         model(
             "claude-haiku-4-5",
@@ -380,6 +400,13 @@ pub fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_models_do_not_offer_context_selection() {
+        for model in static_models().iter().filter(|model| native_million_context(&model.id)) {
+            assert!(!model.options.iter().any(|option| option.id == "contextWindow"));
+        }
+    }
 
     #[test]
     fn the_curated_catalog_offers_the_mast_default() {

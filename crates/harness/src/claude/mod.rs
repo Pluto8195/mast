@@ -310,7 +310,7 @@ impl ClaudeHarness {
             );
         }
         if let Some(model) = &model {
-            let one_m = request
+            let one_m = !catalog::native_million_context(model) && request
                 .model_options
                 .get("contextWindow")
                 .and_then(Value::as_str)
@@ -1253,6 +1253,20 @@ mod tests {
     fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         let i = args.iter().position(|a| a == flag)?;
         args.get(i + 1).map(String::as_str)
+    }
+
+    #[test]
+    fn native_context_ignores_saved_selection() {
+        let harness = ClaudeHarness::new();
+        let mut request = plain_request();
+        request.model = Some("claude-opus-5-5".into());
+        for choice in ["200k", "1m"] {
+            request.model_options.insert("contextWindow".into(), json!(choice));
+            let args = argv(&harness, &request);
+            assert_eq!(flag_value(&args, "--model"), Some("claude-opus-5-5"));
+        }
+        request.model = Some("claude-legacy".into());
+        assert_eq!(flag_value(&argv(&harness, &request), "--model"), Some("claude-legacy[1m]"));
     }
 
     #[test]

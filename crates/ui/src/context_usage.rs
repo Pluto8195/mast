@@ -6,11 +6,38 @@ use gpui::{
 };
 use mast_proto::ContextUsage;
 
-pub fn render(
+pub(crate) struct ContextIndicator {
     usage: Option<ContextUsage>,
-    state: gpui::Entity<crate::state::AppState>,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+    seen: crate::observe_gate::ObserveGate<Option<ContextUsage>>,
+    _subscription: gpui::Subscription,
+}
+
+impl ContextIndicator {
+    pub(crate) fn new(state: gpui::Entity<crate::state::AppState>, cx: &mut Context<Self>) -> Self {
+        let usage = state.read(cx).context_usage;
+        let subscription = cx.observe(&state, |this: &mut Self, state, cx| {
+            let usage = state.read(cx).context_usage;
+            if this.seen.changed(usage) {
+                this.usage = usage;
+                cx.notify();
+            }
+        });
+        Self { usage, seen: crate::observe_gate::ObserveGate::seeded(usage), _subscription: subscription }
+    }
+}
+
+impl Render for ContextIndicator {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        if has_window(self.usage) {
+            render(self.usage, cx.entity(), &theme).into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+}
+
+fn render(usage: Option<ContextUsage>, indicator: gpui::Entity<ContextIndicator>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
     let industrial = theme.ui_style.controls == crate::ui_style::ControlVariant::Key;
     let display_text = theme.text_muted;
@@ -22,7 +49,11 @@ pub fn render(
         Some(_) => theme.text_muted,
         None => theme.text_faint,
     };
-    let track = if industrial { display_text.opacity(0.25) } else { theme.text_faint.opacity(0.25) };
+    let track = if industrial {
+        display_text.opacity(0.25)
+    } else {
+        theme.text_faint.opacity(0.25)
+    };
     let ring = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -55,9 +86,7 @@ pub fn render(
         },
     )
     .size(px(16.0));
-    let label = fraction
-        .map(|f| format!("{:.0}%", f * 100.0))
-        .unwrap_or_else(|| "—".into());
+    let label = percentage_label(usage);
     div()
         .id("context-usage")
         .flex_none()
@@ -72,24 +101,24 @@ pub fn render(
         .when(industrial, |el| el.font_family(theme.font_mono.clone()))
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
-        .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
-            cx.new(|cx| UsageCard {
-                // The card shows only `context_usage`; repaint when it moves.
-                seen: crate::observe_gate::ObserveGate::seeded(state.read(cx).context_usage),
-                _subscription: cx.observe(&state, |this: &mut UsageCard, state, cx| {
-                    if this.seen.changed(state.read(cx).context_usage) {
-                        cx.notify();
-                    }
-                }),
-                state: state.clone(),
-            })
-            .into()
-        })
+        .child(div().debug_selector(|| format!("context-usage-{label}")).child(SharedString::from(label)))
+        .tooltip(move |_, cx| cx.new(|cx| UsageCard {
+            seen: crate::observe_gate::ObserveGate::seeded(indicator.read(cx).usage),
+            _subscription: cx.observe(&indicator, |this: &mut UsageCard, indicator, cx| {
+                if this.seen.changed(indicator.read(cx).usage) { cx.notify(); }
+            }),
+            indicator: indicator.clone(),
+        }).into())
+}
+
+fn percentage_label(usage: Option<ContextUsage>) -> String {
+    usage.and_then(ContextUsage::fraction)
+        .map(|fraction| format!("{:.0}%", fraction * 100.0))
+        .unwrap_or_else(|| "—".into())
 }
 
 struct UsageCard {
-    state: gpui::Entity<crate::state::AppState>,
+    indicator: gpui::Entity<ContextIndicator>,
     seen: crate::observe_gate::ObserveGate<Option<ContextUsage>>,
     _subscription: gpui::Subscription,
 }
@@ -169,9 +198,7 @@ impl Render for UsageCard {
                     .line_height(px(19.0))
                     .whitespace_nowrap()
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(details(
-                        self.state.read(cx).context_usage,
-                    ))),
+                    .child(SharedString::from(details(self.indicator.read(cx).usage))),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
     }
@@ -180,6 +207,13 @@ impl Render for UsageCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn percentage_and_details_use_the_same_usage() {
+        let usage = Some(ContextUsage { tokens: Some(183_925), window: Some(1_000_000) });
+        assert_eq!(percentage_label(usage), "18%");
+        assert!(details(usage).contains("183,925 / 1,000,000 tokens"));
+    }
+
     #[test]
     fn indicator_needs_a_reported_window() {
         assert!(!has_window(None));

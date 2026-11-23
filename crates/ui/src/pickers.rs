@@ -1193,32 +1193,26 @@ impl Pickers {
     /// selections for existing chats, the remembered picks for the model the
     /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
-        if let Some(chat) = self.chat_row(cx) {
-            return chat
-                .config
-                .as_ref()
-                .map(|c| c.model_options.clone())
-                .unwrap_or_default();
-        }
         let Some(harness) = self.effective_harness(cx) else {
             return Default::default();
         };
-        match self.selected_model(cx) {
-            Some(model) => offered_options(
-                model,
-                self.defaults
-                    .model_options_for(harness, &model.id)
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-            // Catalog not loaded (or failed): the picks were validated for
-            // this exact model when made, so they are safe to send as-is.
-            None => self
-                .effective_model_id(cx)
+        let options = if let Some(chat) = self.chat_row(cx) {
+            chat.config.as_ref().map(|c| c.model_options.clone()).unwrap_or_default()
+        } else {
+            self.effective_model_id(cx)
                 .and_then(|id| self.defaults.model_options_for(harness, id))
-                .cloned()
-                .unwrap_or_default(),
+                .cloned().unwrap_or_default()
+        };
+        let mut options = match self.selected_model(cx) {
+            Some(model) => offered_options(model, options),
+            None => options,
+        };
+        if harness == HarnessId::ClaudeCode && self.effective_model_id(cx)
+            .is_some_and(mast_harness::claude::catalog::native_million_context)
+        {
+            options.remove("contextWindow");
         }
+        options
     }
 
     /// The catalog is loaded and offers nothing runnable — the no-agents
@@ -5807,6 +5801,9 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                         default_choice: "1m".into(),
                     });
                 }
+            }
+            if harness == HarnessId::ClaudeCode && mast_harness::claude::catalog::native_million_context(&model.id) {
+                model.options.retain(|option| option.id != "contextWindow");
             }
             if let Some(label) = curated_label(&model.id) {
                 model.label = label;
