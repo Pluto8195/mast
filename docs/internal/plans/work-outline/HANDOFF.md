@@ -1221,6 +1221,43 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-23 11:50; coordinator 9ca67830)
+
+- **Installed: release 117** (3b66d9ad3) at ~11:50; Mikey to restart. 116 backed up as
+  `~/zeron-dev-app-backups/mast-release116-c256f2f12`. Release tests vs c256f2f12: nextest 2867/2867, UI 2938/0; soak
+  vs 116 CPU 6.1 vs 6.0 %, steady 0.6 vs 0.6 %, git/min 161 vs 161, footprint 514 vs 640 MB, growth 58 MB.
+  - **Tracker stage fix** (fix/tracker-stage, Sonnet, four review rounds). Mikey: tickets showed Building while in PR.
+    - Root causes: an expired PR cache entry returned None; a failed gh lookup erased a known PR for 10 min; the UI
+      didn't refetch chat link statuses on PR-cache changes.
+    - Now: fetchers distinguish not-found from transient errors (logged-out gh is an error, never not-found).
+      Transient errors keep the data and its original fetched_at, with backoff, for up to 24 h (merged exempt).
+    - Revisions bump only on a real change and carry the changed URLs and branch keys; only the matching chats expire
+      into an "owed" set that the top-up draws from (max 8 in flight). No polling; replies are batched into one
+      rebuild per 200 ms.
+    - Merged URL entries are never re-queued; branch keys still are, so reused branches update. Pending runs oldest
+      first.
+  - **Go-to-definition** (Terra, three review rounds).
+    - F12, an alternate shortcut and ⌘-click; a picker for several matches; back/forward history; pop-outs reveal
+      same-file definitions locally.
+    - One shared symbol watch per checkout, dropped after 2 min idle; a cold ⌘-click parses on demand.
+    - Installed graph baseline +1 edge: mast-ui → lsp-types (already in the graph via gpui-base).
+  - **Friction from all Spaces** (Terra, three review rounds).
+    - A per-Space grant, default off, set by the human only (`SET_FRICTION_READ_GRANT` is in HUMAN_ONLY_METHODS).
+      `list_friction scope:"allSpaces"`.
+    - Foreign rows are filtered to Mast-qualified tool names (`mcp__mast-agent__…`, `mast-agent.…`), Auto
+      refused-call summaries, or Mast GitHub links. They're stripped to 10 fields, secret-redacted (agent reports are
+      now redacted at write time too) and read-only.
+    - Not fixed (RPC security item 3196df1d): the raw `ListFrictionReports` over the localhost port still takes any
+      space_id.
+- **Release-run gotcha:** run `scripts/run_release_tests.sh <last installed sha>` when you've already pushed; with no
+  arg it diffs against origin and selects nothing.
+- **Parked 2026-11-20:** upstream moved its desktop app off GPUI to zgx (#1499); evaluation item cae8f3ff under Parked.
+- **Worker wakes:** worker reports after a Mast restart can be lost: two workers sat in "Reconnecting n/5" for 2 h
+  (friction 9d648a3a), and a finished round on 11-20 never woke the coordinator. After a restart, check each worker
+  with read_chat. When waiting on a push, poll the branch with `git ls-remote`.
+- **Next:** Wave 4 (container b8ccbcd9); follow-ups (pop-out part 2 cf4d9687, scope-map polish 9b626d42, flaky tests
+  8e9406cb / 82fe9f5f).
+
 ## In flight (snapshot 2026-11-19 20:40; coordinator 9ca67830)
 
 - **Installed: release 116** (c256f2f12) at 20:37; Mikey to restart. 115 backed up as
