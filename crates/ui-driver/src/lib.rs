@@ -6,6 +6,7 @@ pub mod materialize;
 pub mod scenario;
 pub mod serve;
 pub mod session;
+pub mod shape;
 pub mod template;
 pub mod tree;
 pub mod world;
