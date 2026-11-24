@@ -1221,6 +1221,33 @@ Coordinator tips:
 
 The peon tray (`peon_tray.py`) was retired on 2026-10-20. Zeron's own banners and chimes replace it.
 
+## In flight (snapshot 2026-11-24 evening; coordinator 9ca67830)
+
+- **Installed: release 119** (646da66b5); Mikey to restart. 118 backed up as
+  `~/zeron-dev-app-backups/mast-release118-56e798600`. Release tests vs 56e798600: nextest 2884/2884, UI 2940/0. Soak vs
+  118: CPU 11.8 vs 13.4 %, steady 0.6 vs 5.3 %, footprint 547 vs 696 MB, growth −134 MB.
+  - **UI driver medium and scale worlds** (feature/ui-driver-scale-worlds, Terra, two review rounds): `medium` and
+    `scale` presets, the counts-only WorldShape (private file at the parent repo's `docs/private/ui-driver-shape.json`)
+    and two medium scenarios (Tracker, Overview). Fake PR states come from the sandboxed gh stub through a driver-only
+    engine feature that isn't in the installed graph.
+  - **Privacy incident fixed:** driver runs (since at least 2026-11-23) started the external session importer.
+    Scratch roots in /private/tmp held import cursors pointing at live ~/.claude transcripts, and some held
+    databases. All 79 roots were deleted.
+    - Root cause: MAST_SOAK suppressed auto-adoption but not the importer's repair and stale-sync jobs, and the
+      driver sandbox allowed reads of account stores.
+    - Fix: `MAST_DISABLE_EXTERNAL_IMPORT=1` is required by the driver and gates every importer entry point. The
+      sandbox denies the literal and canonical paths of the account, credential and dev stores. Scratch roots are
+      removed by a Drop guard and by `ui-drive stop` (killpg). The shape extractor uses a 0700 source and deletes it
+      afterwards.
+    - Friction 09227b52. Follow-ups: item f7ea7bce.
+- **Next-gen app plan** (item 018c2b98, planner chat a818f204, plan mast-artifact:35d836f8, sheet mast-artifact:f12640a8,
+  10 open rows): Michael approved the shell prototypes on 2026-11-24. Spec: `prototypes/next-gen/SPEC.md` in the parent repo
+  (untracked, in .git/info/exclude). Items: A Tauri c35ac286, B zgx e7d7bfb7. Measured runs open windows, so they need
+  Michael's go-ahead. Upstream's zgx move is parked under cae8f3ff.
+- **Fork review:** a coworker's fork https://github.com/DSWallach/mast is being reviewed read-only (item a274efde).
+- **Soak script template:** /tmp gets cleared. Recreate `soak-when-quiet.sh` from the 116 snapshot pattern (loop
+  until load < 6, then perf-soak `--real` against /Applications/Mast.app, retry on 'stopping before').
+
 ## In flight (snapshot 2026-11-23 afternoon; coordinator 9ca67830)
 
 - **Installed: release 118** (56e798600); Mikey to restart. 117 backed up as
