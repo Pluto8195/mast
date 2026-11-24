@@ -8,6 +8,39 @@ use mast_ui_driver::materialize::{self, main_repo, snapshot_hash, worktree_path}
 use mast_ui_driver::template::Template;
 use mast_ui_driver::world::SmallWorld;
 
+static ISOLATED_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Engine startup must always be guarded: otherwise background import can
+/// inspect the account's real agent sessions while a fixture is being built.
+fn run_isolated(name: &str, private_shape: bool) -> bool {
+    if std::env::var_os("MAST_DRIVER_ROOT").is_some() {
+        return false;
+    }
+    let _guard = ISOLATED_TEST.lock().unwrap();
+    let home = account();
+    let scratch = ScratchDirectories::create(&home).unwrap();
+    if private_shape {
+        let source = std::env::var_os("MAST_UI_DRIVER_SHAPE").expect("shape path required");
+        std::fs::copy(source, scratch.root().join("shape.json")).unwrap();
+    }
+    let executable = std::env::current_exe().unwrap();
+    let mut args = vec!["--exact", name, "--nocapture", "--test-threads=1"];
+    if private_shape {
+        args.push("--ignored");
+    }
+    let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+    let output = scratch.run_isolated(&home, &executable, &args).unwrap();
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    finish(scratch);
+    assert!(
+        output.status.success(),
+        "isolated world test failed: {}",
+        output.status
+    );
+    true
+}
+
 fn account() -> PathBuf {
     // Never touched: only used to prove the scratch root does not overlap it.
     PathBuf::from(std::env::var_os("HOME").expect("HOME"))
@@ -36,6 +69,9 @@ fn finish(scratch: ScratchDirectories) {
 
 #[test]
 fn medium_world_materializes() {
+    if run_isolated("medium_world_materializes", false) {
+        return;
+    }
     let rt = rt();
     let scratch = ScratchDirectories::create(&account()).unwrap();
     let shape = mast_ui_driver::shape::WorldShape::medium();
@@ -45,16 +81,7 @@ fn medium_world_materializes() {
         materialize::materialize(&scratch, &world).await.unwrap();
         let core = materialize::open_core(scratch.data()).unwrap();
         let chats = core.workspace.read_chats().unwrap();
-        let extras: Vec<_> = chats
-            .iter()
-            .filter(|chat| !world.chats.iter().any(|fixture| fixture.id == chat.id))
-            .map(|chat| &chat.id)
-            .collect();
-        assert_eq!(
-            chats.len(),
-            shape.chats,
-            "unexpected fixture chat ids: {extras:?}"
-        );
+        assert_eq!(chats.len(), shape.chats);
         assert_eq!(
             chats.iter().filter(|chat| chat.archived).count(),
             shape.archived_chats
@@ -116,6 +143,9 @@ fn medium_world_materializes() {
 
 #[test]
 fn synthetic_scale_world_matches_shape_and_hash() {
+    if run_isolated("synthetic_scale_world_matches_shape_and_hash", false) {
+        return;
+    }
     let mut shape = mast_ui_driver::shape::WorldShape::medium();
     shape.spaces = 3;
     shape.repositories = 2;
@@ -166,6 +196,20 @@ fn synthetic_scale_world_matches_shape_and_hash() {
                 shape.chat_pr_links
             );
             assert_eq!(snapshots.iter().map(|s| s.items.len()).sum::<usize>(), 9);
+            for (status, expected) in [
+                (mast_proto::WorkItemStatus::Pending, shape.pending_items),
+                (mast_proto::WorkItemStatus::Active, shape.active_items),
+                (mast_proto::WorkItemStatus::Completed, shape.completed_items),
+            ] {
+                assert_eq!(
+                    snapshots
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .filter(|item| item.status == status)
+                        .count(),
+                    expected
+                );
+            }
             assert_eq!(
                 snapshots
                     .iter()
@@ -210,6 +254,37 @@ fn synthetic_scale_world_matches_shape_and_hash() {
             core.shutdown().await;
             hash
         });
+        let mut messages: Vec<_> = world.chats.iter().map(|chat| chat.entries.len()).collect();
+        messages.sort_unstable();
+        assert_eq!(messages[messages.len() / 2], shape.messages_per_chat_median);
+        assert_eq!(
+            messages[((messages.len() - 1) * 9).div_ceil(10)],
+            shape.messages_per_chat_p90
+        );
+        for repo in 0..shape.repositories {
+            let cwd = scratch.repositories().join(format!("repository-{repo}"));
+            let worktrees = scratch
+                .git(&cwd, &["worktree", "list", "--porcelain"], &[])
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&worktrees.stdout)
+                    .lines()
+                    .filter(|line| line.starts_with("worktree "))
+                    .count(),
+                shape.worktrees_per_repository_median
+            );
+            let branches = scratch
+                .git(
+                    &cwd,
+                    &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&branches.stdout).lines().count(),
+                shape.branches_per_repository_median
+            );
+        }
         finish(scratch);
         hash
     };
@@ -219,7 +294,10 @@ fn synthetic_scale_world_matches_shape_and_hash() {
 #[test]
 #[ignore = "requires a private shape file"]
 fn private_scale_world_materializes() {
-    let path = std::env::var_os("MAST_UI_DRIVER_SHAPE").expect("shape path required");
+    if run_isolated("private_scale_world_materializes", true) {
+        return;
+    }
+    let path = PathBuf::from(std::env::var_os("MAST_DRIVER_ROOT").unwrap()).join("shape.json");
     let shape: mast_ui_driver::shape::WorldShape =
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     let world = SmallWorld::shaped(1, "scale", &shape).unwrap();
@@ -235,6 +313,9 @@ fn private_scale_world_materializes() {
 
 #[test]
 fn same_seed_same_hash_different_seed_different_hash() {
+    if run_isolated("same_seed_same_hash_different_seed_different_hash", false) {
+        return;
+    }
     let rt = rt();
     let hash_for = |seed: u64| {
         let scratch = ScratchDirectories::create(&account()).unwrap();
@@ -284,6 +365,9 @@ fn same_seed_same_hash_different_seed_different_hash() {
 
 #[test]
 fn template_clones_and_reset_restores_it() {
+    if run_isolated("template_clones_and_reset_restores_it", false) {
+        return;
+    }
     let rt = rt();
     let scratch = ScratchDirectories::create(&account()).unwrap();
     let world = SmallWorld::small(11);

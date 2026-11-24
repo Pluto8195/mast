@@ -157,6 +157,7 @@ pub fn materialize_repos(scratch: &ScratchDirectories, world: &SmallWorld) -> st
 }
 
 pub fn open_core(data: &Path) -> Result<EngineCore, String> {
+    crate::preflight()?;
     let profile = EngineProfile::local(data).map_err(|e| e.to_string())?;
     EngineCore::assemble_with_profile(
         profile,

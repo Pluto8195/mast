@@ -72,8 +72,18 @@ pub struct ScratchDirectories {
 impl ScratchDirectories {
     pub fn create(account_home: &Path) -> io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
+        let template = if std::env::var_os("MAST_DRIVER_ROOT").is_some() {
+            PathBuf::from(
+                std::env::var_os("TMPDIR")
+                    .ok_or_else(|| io::Error::other("missing isolated TMPDIR"))?,
+            )
+            .join("mast-drive.XXXXXX")
+        } else {
+            PathBuf::from("/private/tmp/mast-drive.XXXXXX")
+        };
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-drive.XXXXXX"])
+            .arg("-d")
+            .arg(template)
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other("could not allocate scratch root"));
@@ -194,13 +204,36 @@ impl ScratchDirectories {
             Path::new("/bin"),
         ])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        std::process::Command::new(self.shims.join("git"))
+        let mut command = mast_harness::git_command();
+        // Outside the isolated launcher (only repository setup tests), the
+        // harness resolves system git. Preserve the shim's log and isolation
+        // settings in that case too. Inside the sandbox git resolves to shim.
+        if command.get_program() != self.shims.join("git").as_os_str() {
+            use std::io::Write;
+            let mut log = std::fs::OpenOptions::new()
+                .append(true)
+                .open(self.git_log())?;
+            writeln!(log, "git {}", args.join(" "))?;
+        }
+        command
             .args(args)
             .current_dir(cwd)
             .env_clear()
             .env("HOME", &self.paths.home)
             .env("TMPDIR", &self.paths.temporary)
             .env("PATH", path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_AUTHOR_NAME", "Driver fixture")
+            .env("GIT_AUTHOR_EMAIL", "driver@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Driver fixture")
+            .env("GIT_COMMITTER_EMAIL", "driver@example.invalid")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+            .env("GIT_CONFIG_VALUE_0", "/dev/null")
+            .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
+            .env("GIT_CONFIG_VALUE_1", "false")
             .envs(env.iter().copied())
             .output()
     }
