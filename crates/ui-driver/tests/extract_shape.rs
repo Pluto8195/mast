@@ -29,6 +29,44 @@ fn git(path: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+// A linked worktree can point its .git file at a different directory. Check
+// that pointer before invoking git, so it cannot open the live Mast store.
+fn safe_repository(path: &Path, live_store: &Path) -> bool {
+    for ancestor in path.ancestors() {
+        let dot_git = ancestor.join(".git");
+        let Ok(metadata) = std::fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        let git_dir = if metadata.is_file() {
+            let Ok(pointer) = std::fs::read_to_string(&dot_git) else {
+                return false;
+            };
+            let Some(target) = pointer.trim().strip_prefix("gitdir: ") else {
+                return false;
+            };
+            ancestor.join(target)
+        } else {
+            dot_git
+        };
+        let Ok(git_dir) = git_dir.canonicalize() else {
+            return false;
+        };
+        if git_dir.starts_with(live_store) {
+            return false;
+        }
+        if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+            let Ok(common) = git_dir.join(common.trim()).canonicalize() else {
+                return false;
+            };
+            if common.starts_with(live_store) {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
 #[test]
 #[ignore = "reads a local backup and writes a private shape; invoke explicitly"]
 fn extract_shape_from_backup() {
@@ -85,7 +123,17 @@ fn extract() -> Result<(), Box<dyn std::error::Error>> {
             .filter_map(|chat| chat.cwd.as_ref().map(PathBuf::from)),
     );
     let mut repos = BTreeMap::new();
+    let live_store = PathBuf::from(std::env::var_os("HOME").ok_or("missing home")?).join(".zeron");
     for path in candidates {
+        if path.starts_with(&live_store) {
+            continue;
+        }
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.starts_with(&live_store) || !safe_repository(&canonical, &live_store) {
+            continue;
+        }
         let Some(common) = git(
             &path,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],

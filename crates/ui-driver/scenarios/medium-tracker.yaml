@@ -1,0 +1,14 @@
+name: medium-tracker
+world: { preset: medium, seed: 1 }
+screenshot: off
+steps:
+  - key: "cmd-alt-t"
+  - settle: quiet
+  - expect: { visible: "#right-surface-team-tab" }
+  - expect: { visible: "#tracker-stage-bar" }
+  - expect: { visible: "#tracker-filter-Stage(NotStarted)" }
+  - expect: { visible: "#tracker-filter-Stage(Building)" }
+  - expect: { visible: "#tracker-filter-Stage(CodeReview)" }
+  - expect: { visible: "#tracker-filter-Stage(PrReview)" }
+  - expect: { visible: "#tracker-filter-Stage(ReadyToMerge)" }
+  - expect: { visible: "#tracker-filter-Stage(Done)" }
