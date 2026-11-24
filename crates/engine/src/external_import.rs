@@ -213,6 +213,22 @@ pub struct ExternalSessionImporter {
     store: Arc<DocsStore>,
     device_id: String,
     workspace: WorkspaceHost,
+    enabled: bool,
+}
+
+fn import_enabled(disabled: Option<&str>) -> bool {
+    !disabled.is_some_and(|value| {
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn external_import_switch_disables_imports() {
+    assert!(import_enabled(None));
+    assert!(import_enabled(Some("0")));
+    assert!(import_enabled(Some("false")));
+    assert!(!import_enabled(Some("1")));
 }
 
 impl ExternalSessionImporter {
@@ -221,6 +237,21 @@ impl ExternalSessionImporter {
             store,
             device_id: device_id.to_string(),
             workspace,
+            enabled: import_enabled(
+                mast_proto::env::var("MAST_DISABLE_EXTERNAL_IMPORT").ok().as_deref(),
+            ),
+        }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn require_enabled(&self) -> Result<(), EngineError> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(EngineError::Other("external session import is disabled".into()))
         }
     }
 
@@ -234,6 +265,7 @@ impl ExternalSessionImporter {
         external_session_id: &str,
         transcript_path: &Path,
     ) -> Result<ImportedSession, EngineError> {
+        self.require_enabled()?;
         let stamp = file_stamp(transcript_path);
         let parsed = parse_transcript(transcript_path, &self.device_id)?;
         let cwd = parsed
@@ -379,6 +411,7 @@ impl ExternalSessionImporter {
     /// Returns `Ok(SyncResult { new_message_count: 0, .. })` as a normal,
     /// common result — not an error — when there's nothing new.
     pub fn sync(&self, chat_id: &str) -> Result<SyncResult, EngineError> {
+        self.require_enabled()?;
         let cursor = self.read_cursor(chat_id)?.ok_or_else(|| {
             EngineError::Other(format!(
                 "chat {chat_id} has no external-import record to sync"
@@ -495,6 +528,7 @@ impl ExternalSessionImporter {
     /// EOF assistant tail that remained byte-for-byte stable across two
     /// observations.
     pub fn sync_stale_imports(&self) -> Result<(usize, usize), EngineError> {
+        self.require_enabled()?;
         let (mut chats, mut messages) = (0, 0);
         for chat in self.workspace.read_chats()? {
             let Ok(Some(cursor)) = self.read_cursor(&chat.id) else {
@@ -559,6 +593,7 @@ impl ExternalSessionImporter {
     /// `note_message`. Safe to call on every boot — chats already stamped
     /// are skipped, so repeated calls do no work.
     pub fn repair_missing_timestamps(&self) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         let mut repaired = 0;
         for chat in self.workspace.read_chats()? {
             if chat.harness_session_id.is_none() || chat.last_message_at.is_some() {
@@ -621,6 +656,7 @@ impl ExternalSessionImporter {
     /// every boot — a chat that already has a config (this repair's own
     /// prior pass, or a normal run) is skipped.
     pub fn repair_missing_config(&self) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         let mut repaired = 0;
         for chat in self.workspace.read_chats()? {
             if chat.config.is_some() {
@@ -700,6 +736,7 @@ impl ExternalSessionImporter {
         &self,
         context_usage: &ContextUsageProvider,
     ) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         let registry = load_agent_mode_task_names();
         let mut repaired = 0;
         for chat in self.workspace.read_chats()? {
@@ -797,6 +834,7 @@ impl ExternalSessionImporter {
     /// still lists, so a stray cursor for an already-deleted chat is inert,
     /// just not tidy.
     pub fn repair_junk_imports(&self) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         let mut removed = 0;
         for chat in self.workspace.read_chats()? {
             if chat.harness_session_id.is_none() {
@@ -841,6 +879,7 @@ impl ExternalSessionImporter {
         &self,
         context_usage: &ContextUsageProvider,
     ) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         let mut repaired = 0;
         for chat in self.workspace.read_chats()? {
             // Skip only a chat that already has a PR link: a chat that
@@ -959,6 +998,9 @@ impl ExternalSessionImporter {
     /// callers (e.g. subagent scanning) treat that as "nothing to scan",
     /// not an error.
     pub fn transcript_path_for(&self, chat_id: &str) -> Result<Option<PathBuf>, EngineError> {
+        if !self.enabled {
+            return Ok(None);
+        }
         Ok(self
             .read_cursor(chat_id)?
             .map(|c| PathBuf::from(c.transcript_path)))
@@ -999,6 +1041,7 @@ impl ExternalSessionImporter {
     /// fatal — matches [`parse_transcript`]'s tolerant stance. Blocking (fs);
     /// run off the async path.
     pub fn scan(&self) -> Result<Vec<ExternalSessionCandidate>, EngineError> {
+        self.require_enabled()?;
         let home = home_dir();
         mast_proto::env::assert_test_home_isolated(&home);
         let root = home.join(".claude").join("projects");
@@ -1100,6 +1143,7 @@ impl ExternalSessionImporter {
     /// the next interval. Disabled entirely when `MAST_DISABLE_AUTO_ADOPT`
     /// is set to a non-empty value other than `0`/`false`.
     pub fn auto_adopt_external_sessions(&self) -> Result<usize, EngineError> {
+        self.require_enabled()?;
         self.auto_adopt_with(auto_adopt_disabled(), std::time::SystemTime::now(), |c| {
             crate::liveness::check_liveness(
                 Path::new(&c.path),
@@ -1174,6 +1218,7 @@ impl ExternalSessionImporter {
         &self,
         mut emit: impl FnMut(BulkImportEvent),
     ) -> Result<BulkImportEvent, EngineError> {
+        self.require_enabled()?;
         let archived_ids = read_session_canvas_archive_ids();
         let candidates = self.scan()?;
         let total = candidates.len();

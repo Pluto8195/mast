@@ -155,6 +155,10 @@ def start(args):
             die(f"unknown start option {flag}", 2)
     if not seed.isdigit():
         die("--seed must be a number", 2)
+    if preset not in ("small", "medium", "scale"):
+        die("--preset must be small, medium or scale", 2)
+    if preset == "scale" and not os.environ.get("MAST_UI_DRIVER_SHAPE"):
+        die("scale preset requires MAST_UI_DRIVER_SHAPE", 2)
     pid = session_pid()
     if pid and pid_alive(pid):
         die(f"a driver is already running (pid {pid}); `scripts/ui-drive stop` first")
@@ -172,6 +176,8 @@ def start(args):
         environment["MAST_DRIVE_RENDER"] = "1"
     if mock:
         environment["MAST_DRIVE_MOCK"] = mock
+    if preset == "scale":
+        environment["MAST_UI_DRIVER_SHAPE"] = os.environ["MAST_UI_DRIVER_SHAPE"]
     launcher = subprocess.Popen(
         [executable, "--ignored", "--exact", "drive_launcher", "--test-threads=1"],
         env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,
@@ -227,16 +233,44 @@ def run_scenario(args):
 
 def stop():
     pid = session_pid()
-    if read("root") and pid and pid_alive(pid):
+    root = read("root")
+    if pid and pid_alive(pid):
+        command = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
         try:
-            call({"cmd": "stop"}, timeout=60)
-        except SystemExit:
-            pass
-        deadline = time.time() + 30
-        while time.time() < deadline and not os.path.exists(os.path.join(SESSION, "exited")):
-            time.sleep(0.2)
-        if pid_alive(pid):
-            os.kill(pid, signal.SIGTERM)
+            if "drive_launcher" not in command or os.getpgid(pid) != pid:
+                die("recorded launcher no longer identifies the driver; scratch was not removed")
+        except ProcessLookupError:
+            command = ""
+        if root:
+            try:
+                call({"cmd": "stop"}, timeout=60)
+            except SystemExit:
+                pass
+        if command:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    if pid:
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            die("driver process group is still running; scratch was not removed")
+    if root:
+        root = root.strip()
+        if os.path.lexists(root):
+            if (os.path.islink(root) or os.path.realpath(root) != root
+                    or os.path.dirname(root) != "/private/tmp"
+                    or not os.path.basename(root).startswith("mast-drive.")
+                    or os.stat(root, follow_symlinks=False).st_uid != os.getuid()):
+                die("refusing to remove an invalid driver scratch root")
+            shutil.rmtree(root)
     shutil.rmtree(SESSION, ignore_errors=True)
     print("stopped")
 

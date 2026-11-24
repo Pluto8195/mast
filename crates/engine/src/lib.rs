@@ -404,10 +404,12 @@ impl EngineCore {
             &device_id,
             workspace.clone(),
         );
+        // Includes one-shot repair and stale-sync jobs, not just auto-adopt.
+        let external_import_enabled = external_import.enabled();
         // One-time, idempotent repair for chats imported before `last_message_at`
         // stamping existed (see `repair_missing_timestamps`'s doc comment) —
         // off the boot path since it's a blocking doc-store walk.
-        {
+        if external_import_enabled {
             let importer = external_import.clone();
             tokio::task::spawn_blocking(move || match importer.repair_missing_timestamps() {
                 Ok(0) => {}
@@ -426,7 +428,7 @@ impl EngineCore {
         // adopted from Mast's own title-generator runs (first message =
         // `TITLE_INSTRUCTIONS`; see `MAST_TITLE_PROMPT_PREFIX`), since the
         // pass keys off `is_synthetic_prompt`.
-        {
+        if external_import_enabled {
             let importer = external_import.clone();
             tokio::task::spawn_blocking(move || match importer.repair_junk_imports() {
                 Ok(0) => {}
@@ -441,7 +443,7 @@ impl EngineCore {
         // to stamp a Claude Code `ChatConfig` (see `repair_missing_config`'s
         // doc comment) — without it, resuming one of these chats can dispatch
         // on the wrong harness.
-        {
+        if external_import_enabled {
             let importer = external_import.clone();
             tokio::task::spawn_blocking(move || match importer.repair_missing_config() {
                 Ok(0) => {}
@@ -467,7 +469,7 @@ impl EngineCore {
         // harness session (e.g. one Mast itself launched) — same
         // cursor-or-harness-session transcript resolution `repair_missing_links`
         // uses, via `context_usage`.
-        {
+        if external_import_enabled {
             let importer = external_import.clone();
             let context_usage = context_usage.clone();
             tokio::task::spawn_blocking(move || {
@@ -513,6 +515,38 @@ impl EngineCore {
             );
         }
         let pr_ticket_cache = pr_ticket_cache::PrTicketCache::new();
+        #[cfg(feature = "ui-driver")]
+        let driver_pr_count = match std::fs::read_to_string(data_dir.join("driver-pr-count")) {
+            Ok(count) => Some(count),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(feature = "ui-driver")]
+        if let Some(count) = driver_pr_count {
+            // This feature is test-only. Fail closed before invoking the stub:
+            // require the driver's guarded scratch root and a kernel network denial.
+            let root = std::env::var_os("MAST_DRIVER_ROOT")
+                .ok_or_else(|| EngineError::Other("missing driver scratch root".into()))?;
+            let root = std::path::PathBuf::from(root).canonicalize()?;
+            let data = data_dir.canonicalize()?;
+            let shim = std::env::var_os("MAST_SOAK_SHIM_DIR")
+                .ok_or_else(|| EngineError::Other("missing driver shim directory".into()))?;
+            let shim = std::path::PathBuf::from(shim).canonicalize()?;
+            let target = std::net::SocketAddr::from(([192, 0, 2, 1], 443));
+            let denied = matches!(
+                std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_secs(1)),
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+            );
+            if !soak || external_import_enabled || !data.starts_with(&root)
+                || shim != root.join("shims") || !denied {
+                return Err(EngineError::Other(
+                    "driver PR fixtures require the isolated driver sandbox".into(),
+                ));
+            }
+            let count = count.trim().parse()
+                .map_err(|_| EngineError::Other("invalid driver PR fixture count".into()))?;
+            pr_ticket_cache.load_driver_fixtures(count).map_err(EngineError::Other)?;
+        }
         pr_ticket_cache.set_linear(linear.clone(), workspace.clone());
         if !soak {
             pr_review_sync.spawn_sync_loop();
@@ -521,7 +555,7 @@ impl EngineCore {
         // 6): backfill durable PR/ticket links for chats whose transcript
         // predates the feature — off the boot path, needs `context_usage`'s
         // two-source transcript resolution so it's built after that.
-        {
+        if external_import_enabled {
             let importer = external_import.clone();
             let context_usage = context_usage.clone();
             tokio::task::spawn_blocking(move || {
@@ -542,14 +576,17 @@ impl EngineCore {
             let importer = external_import.clone();
             let completed_tail_recovery = sessions.clone();
             tokio::spawn(async move {
-                let sync = tokio::task::spawn_blocking(move || importer.sync_stale_imports()).await;
-                match sync {
-                    Ok(Ok((0, _))) => {}
-                    Ok(Ok((n, m))) => {
-                        tracing::info!(count = n, new_messages = m, "synced stale imported chats")
+                if external_import_enabled {
+                    let sync =
+                        tokio::task::spawn_blocking(move || importer.sync_stale_imports()).await;
+                    match sync {
+                        Ok(Ok((0, _))) => {}
+                        Ok(Ok((n, m))) => {
+                            tracing::info!(count = n, new_messages = m, "synced stale imported chats")
+                        }
+                        Ok(Err(err)) => tracing::warn!(error = %err, "stale import sync pass failed"),
+                        Err(err) => tracing::warn!(error = %err, "stale import sync pass panicked"),
                     }
-                    Ok(Err(err)) => tracing::warn!(error = %err, "stale import sync pass failed"),
-                    Err(err) => tracing::warn!(error = %err, "stale import sync pass panicked"),
                 }
                 // Imported EOF tails and native journal commits share the same
                 // repair shape. Reconcile only after the stale-source pass so
@@ -574,7 +611,7 @@ impl EngineCore {
         // for the engine's lifetime. Kill switch: MAST_DISABLE_AUTO_ADOPT.
         // Skipped for the Development scope (test/dev harness profiles) so
         // synthetic-HOME tests aren't raced by a background adopter.
-        if profile.scope() != WorkspaceScope::Development && !soak {
+        if profile.scope() != WorkspaceScope::Development && !soak && external_import_enabled {
             let importer = external_import.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));

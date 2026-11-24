@@ -1,0 +1,8 @@
+name: medium-overview
+world: { preset: medium, seed: 1 }
+screenshot: off
+steps:
+  - expect: { visible: "#sidebar-open-overview" }
+  - key: "cmd-shift-o"
+  - settle: quiet
+  - expect: { visible: "searchinput[name='Search chats…']" }

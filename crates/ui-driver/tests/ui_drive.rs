@@ -33,17 +33,23 @@ fn drive_serve() {
 #[test]
 #[ignore = "requires permission to apply a macOS sandbox"]
 fn drive_launcher() {
-    let session = PathBuf::from(std::env::var_os("MAST_DRIVE_SESSION").expect("MAST_DRIVE_SESSION"));
+    let session =
+        PathBuf::from(std::env::var_os("MAST_DRIVE_SESSION").expect("MAST_DRIVE_SESSION"));
     let seed: u64 = std::env::var("MAST_DRIVE_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
     let preset = std::env::var("MAST_DRIVE_PRESET").unwrap_or_else(|_| "small".into());
     let render = std::env::var_os("MAST_DRIVE_RENDER").is_some();
+    let shape = mast_ui_driver::scenario::World { preset: preset.clone(), seed, mock: None, shape: None }
+        .shape_bytes().expect("invalid world shape");
     let account = account_home();
     let scratch = ScratchDirectories::create(&account).expect("scratch");
     let ctl = serve::control_dir(scratch.root());
     std::fs::create_dir(&ctl).unwrap();
+    if let Some(bytes) = shape {
+        std::fs::write(ctl.join("shape.json"), bytes).unwrap();
+    }
     let config = serve::Config {
         preset,
         seed,
@@ -51,7 +57,11 @@ fn drive_launcher() {
         mock: std::env::var("MAST_DRIVE_MOCK").ok(),
     };
     std::fs::write(ctl.join("config.json"), config.to_json().to_string()).unwrap();
-    std::fs::write(session.join("root"), scratch.root().to_string_lossy().as_bytes()).unwrap();
+    std::fs::write(
+        session.join("root"),
+        scratch.root().to_string_lossy().as_bytes(),
+    )
+    .unwrap();
     let exe = std::env::current_exe().unwrap();
     let args = [
         "--ignored",
@@ -123,10 +133,14 @@ impl Driver {
                 }
             }
             if driver.session.join("exited").exists() {
-                let log = std::fs::read_to_string(driver.session.join("serve.log")).unwrap_or_default();
+                let log =
+                    std::fs::read_to_string(driver.session.join("serve.log")).unwrap_or_default();
                 panic!("driver exited during start:\n{log}");
             }
-            assert!(started.elapsed() < Duration::from_secs(300), "driver start timed out");
+            assert!(
+                started.elapsed() < Duration::from_secs(300),
+                "driver start timed out"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -147,7 +161,10 @@ impl Driver {
             {
                 return value;
             }
-            assert!(started.elapsed() < Duration::from_secs(120), "request timed out: {request}");
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "request timed out: {request}"
+            );
             std::thread::sleep(Duration::from_millis(25));
         }
     }
@@ -163,7 +180,10 @@ impl Driver {
         self.call(json!({"cmd": "stop"}));
         let _ = self.launcher.wait();
         let log = std::fs::read_to_string(self.session.join("serve.log")).unwrap_or_default();
-        assert!(log.contains("status: exit status: 0"), "serve exited badly:\n{log}");
+        assert!(
+            log.contains("status: exit status: 0"),
+            "serve exited badly:\n{log}"
+        );
         std::fs::remove_dir_all(&self.session).unwrap();
     }
 }
@@ -197,14 +217,23 @@ fn select_chat_type_key_and_ambiguity() {
     let mut d = Driver::start(1, false);
     let first = d.tree();
     assert_eq!(first["ok"], json!(true));
-    assert!(first["header"].as_str().unwrap().starts_with("preset=small seed=1 template="));
+    assert!(
+        first["header"]
+            .as_str()
+            .unwrap()
+            .starts_with("preset=small seed=1 template=")
+    );
     assert!(tree_of(&first).contains("Review the workspace layout."));
     let before = selected_chat(&first);
 
     // Select another chat by role + name: the engine-backed selection changes
     // and that chat's transcript replaces the first one.
     let world = mast_ui_driver::world::SmallWorld::small(1);
-    let target = world.chats.iter().find(|c| c.title == "Verify the changes").unwrap();
+    let target = world
+        .chats
+        .iter()
+        .find(|c| c.title == "Verify the changes")
+        .unwrap();
     let wanted = target
         .entries
         .iter()
@@ -216,7 +245,11 @@ fn select_chat_type_key_and_ambiguity() {
     assert_ne!(selected_chat(&clicked), before);
     assert_eq!(selected_chat(&clicked), target.id);
     let snippet: String = wanted.chars().take(40).collect();
-    assert!(tree_of(&clicked).contains(&snippet), "transcript missing {snippet:?}:\n{}", tree_of(&clicked));
+    assert!(
+        tree_of(&clicked).contains(&snippet),
+        "transcript missing {snippet:?}:\n{}",
+        tree_of(&clicked)
+    );
     assert!(!tree_of(&clicked).contains("Review the workspace layout."));
     assert!(clicked["timing"]["draws"].as_u64().unwrap() >= 1);
     assert!(clicked["timing"]["nodes"].as_u64().unwrap() > 5);
@@ -224,15 +257,26 @@ fn select_chat_type_key_and_ambiguity() {
     // Type into the composer; the value shows in the tree. Then one key.
     let typed = d.call(json!({"cmd": "type", "locator": "#composer-input", "text": "hello world"}));
     assert_eq!(typed["ok"], json!(true), "{typed}");
-    assert!(tree_of(&typed).contains("value=\"hello world\""), "{}", tree_of(&typed));
+    assert!(
+        tree_of(&typed).contains("value=\"hello world\""),
+        "{}",
+        tree_of(&typed)
+    );
     let keyed = d.call(json!({"cmd": "key", "chord": "backspace"}));
-    assert!(tree_of(&keyed).contains("value=\"hello worl\""), "{}", tree_of(&keyed));
+    assert!(
+        tree_of(&keyed).contains("value=\"hello worl\""),
+        "{}",
+        tree_of(&keyed)
+    );
 
     // Ambiguous: two nodes contain "Verify"; an error lists both, nothing is clicked.
     let ambiguous = d.click("text=\"Verify\"");
     assert_eq!(ambiguous["ok"], json!(false));
     let error = ambiguous["error"].as_str().unwrap();
-    assert!(error.contains("ambiguous") && error.matches("\n  e").count() >= 2, "{error}");
+    assert!(
+        error.contains("ambiguous") && error.matches("\n  e").count() >= 2,
+        "{error}"
+    );
     // :nth picks one explicitly; unknown locators and bad syntax are errors too.
     assert_eq!(d.click("#nope")["ok"], json!(false));
     assert_eq!(d.click("???")["ok"], json!(false));
@@ -247,7 +291,11 @@ fn png_is_written_and_same_seed_same_tree() {
     let png = a.call(json!({"cmd": "png"}));
     assert_eq!(png["ok"], json!(true), "{png}");
     let bytes = std::fs::read(png["message"].as_str().unwrap()).unwrap();
-    assert!(bytes.starts_with(b"\x89PNG") && bytes.len() > 10_000, "png is {} bytes", bytes.len());
+    assert!(
+        bytes.starts_with(b"\x89PNG") && bytes.len() > 10_000,
+        "png is {} bytes",
+        bytes.len()
+    );
     a.stop();
     // A run without the renderer sees the same tree: the gate never needs Metal.
     let mut b = Driver::start(7, false);
@@ -255,7 +303,11 @@ fn png_is_written_and_same_seed_same_tree() {
     assert_eq!(tree_a["tree_hash"], tree_b["tree_hash"]);
     assert_eq!(tree_of(&tree_a), tree_of(&tree_b));
     let refused = b.call(json!({"cmd": "png"}));
-    assert_eq!(refused["ok"], json!(false), "png without --render must fail closed");
+    assert_eq!(
+        refused["ok"],
+        json!(false),
+        "png without --render must fail closed"
+    );
     b.stop();
 }
 
@@ -273,7 +325,12 @@ fn bounds_of(response: &Value, name: &str) -> Option<[f32; 4]> {
     let (xy, wh) = inner.split_once(' ')?;
     let (x, y) = xy.split_once(',')?;
     let (w, h) = wh.split_once('x')?;
-    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+    Some([
+        x.parse().ok()?,
+        y.parse().ok()?,
+        w.parse().ok()?,
+        h.parse().ok()?,
+    ])
 }
 
 /// Excerpt of the tree lines that matter to a step, for the flow transcript.
@@ -296,17 +353,28 @@ const STEP_MAX_DRAW_MS: f64 = 4000.0;
 fn step(name: &str, response: &Value, log: &mut Vec<String>, needles: &[&str]) {
     assert_eq!(response["ok"], json!(true), "{name}: {response}");
     let t = &response["timing"];
-    let (draws, draw_ms) = (t["draws"].as_u64().unwrap_or(0), t["draw_ms"].as_f64().unwrap_or(0.0));
+    let (draws, draw_ms) = (
+        t["draws"].as_u64().unwrap_or(0),
+        t["draw_ms"].as_f64().unwrap_or(0.0),
+    );
     log.push(format!(
         "{name}: draws={draws} draw_ms={draw_ms} wall_ms={} nodes={}\n    {}",
-        t["wall_ms"], t["nodes"], excerpt(response, needles)
+        t["wall_ms"],
+        t["nodes"],
+        excerpt(response, needles)
     ));
     println!("{}", log.last().unwrap());
     // Frame-callback draws (glide, spinner) are bounded by the driver; the
     // guard is on the rest.
     let animated = t["animated"].as_u64().unwrap_or(0);
-    assert!(draws - animated <= STEP_MAX_DRAWS, "{name}: {draws} draws ({animated} animated)");
-    assert!(draw_ms <= STEP_MAX_DRAW_MS, "{name}: {draw_ms}ms of draw time");
+    assert!(
+        draws - animated <= STEP_MAX_DRAWS,
+        "{name}: {draws} draws ({animated} animated)"
+    );
+    assert!(
+        draw_ms <= STEP_MAX_DRAW_MS,
+        "{name}: {draw_ms}ms of draw time"
+    );
 }
 
 /// B5, the first flow: open a chat, send a message, approve the agent's
@@ -323,14 +391,31 @@ fn first_flow_send_approve_finish() {
 
     // 1. Open a chat from the sidebar.
     let opened = d.click("button[name=\"Fresh chat\"]");
-    step("open chat", &opened, &mut log, &["Fresh chat", "composer-input", "transcript-region"]);
-    assert!(bounds_of(&opened, "transcript-region").is_some(), "transcript region missing");
+    step(
+        "open chat",
+        &opened,
+        &mut log,
+        &["Fresh chat", "composer-input", "transcript-region"],
+    );
+    assert!(
+        bounds_of(&opened, "transcript-region").is_some(),
+        "transcript region missing"
+    );
 
     // 2. Type into the composer and press Enter.
-    let typed = d.call(json!({"cmd": "type", "locator": "#composer-input", "text": "run the tests"}));
+    let typed =
+        d.call(json!({"cmd": "type", "locator": "#composer-input", "text": "run the tests"}));
     step("type", &typed, &mut log, &["composer-input"]);
-    assert!(tree_of(&typed).contains("value=\"run the tests\""), "{}", tree_of(&typed));
-    assert!(tree_of(&typed).lines().any(|l| l.contains("composer-input") && l.contains("focused")));
+    assert!(
+        tree_of(&typed).contains("value=\"run the tests\""),
+        "{}",
+        tree_of(&typed)
+    );
+    assert!(
+        tree_of(&typed)
+            .lines()
+            .any(|l| l.contains("composer-input") && l.contains("focused"))
+    );
     let sent = d.call(json!({"cmd": "key", "chord": "enter"}));
     step("enter", &sent, &mut log, &["run the tests"]);
 
@@ -344,47 +429,106 @@ fn first_flow_send_approve_finish() {
         std::thread::sleep(Duration::from_millis(100));
         card = d.tree();
     }
-    step("approval card", &card, &mut log, &["run the tests", "question-panel", "Approve", "Deny", "Before I wire"]);
+    step(
+        "approval card",
+        &card,
+        &mut log,
+        &[
+            "run the tests",
+            "question-panel",
+            "Approve",
+            "Deny",
+            "Before I wire",
+        ],
+    );
     // The agent's reply text is in the tree: the own-send glide ran, so the
     // reply is not parked below the fold.
-    assert!(tree_of(&card).contains("Before I wire the reconciliation path"), "reply text missing:\n{}", tree_of(&card));
     assert!(
-        tree_of(&card).lines().any(|l| l.contains("paragraph \"run the tests\"")),
+        tree_of(&card).contains("Before I wire the reconciliation path"),
+        "reply text missing:\n{}",
+        tree_of(&card)
+    );
+    assert!(
+        tree_of(&card)
+            .lines()
+            .any(|l| l.contains("paragraph \"run the tests\"")),
         "user message not in the transcript:\n{}",
         tree_of(&card)
     );
-    assert!(tree_of(&card).contains("sel=question-panel"), "{}", tree_of(&card));
+    assert!(
+        tree_of(&card).contains("sel=question-panel"),
+        "{}",
+        tree_of(&card)
+    );
     assert!(tree_of(&card).contains("\"Approve command\""));
 
     // 5. Approve. 6. The agent finishes.
     let approved = d.click("button[name=\"Approve\"]");
-    step("approve", &approved, &mut log, &["Approve", "composer-send", "composer-stop"]);
+    step(
+        "approve",
+        &approved,
+        &mut log,
+        &["Approve", "composer-send", "composer-stop"],
+    );
     let mut done = approved;
     for _ in 0..60 {
-        if tree_of(&done).contains("sel=composer-send") && !tree_of(&done).contains("question-panel") {
+        if tree_of(&done).contains("sel=composer-send")
+            && !tree_of(&done).contains("question-panel")
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
         done = d.tree();
     }
-    step("finished", &done, &mut log, &["run the tests", "composer-send", "composer-input", "Locked in"]);
-    assert!(tree_of(&done).contains("Locked in"), "final reply missing:\n{}", tree_of(&done));
-    assert!(tree_of(&done).contains("Approve"), "chosen answer not in the final reply:\n{}", tree_of(&done));
+    step(
+        "finished",
+        &done,
+        &mut log,
+        &[
+            "run the tests",
+            "composer-send",
+            "composer-input",
+            "Locked in",
+        ],
+    );
+    assert!(
+        tree_of(&done).contains("Locked in"),
+        "final reply missing:\n{}",
+        tree_of(&done)
+    );
+    assert!(
+        tree_of(&done).contains("Approve"),
+        "chosen answer not in the final reply:\n{}",
+        tree_of(&done)
+    );
     // Idle again: Send is back and Stop is gone.
-    assert!(tree_of(&done).contains("sel=composer-send") && !tree_of(&done).contains("sel=composer-stop"), "{}", tree_of(&done));
-    assert!(!tree_of(&done).contains("sel=question-panel"), "approval card still showing");
+    assert!(
+        tree_of(&done).contains("sel=composer-send")
+            && !tree_of(&done).contains("sel=composer-stop"),
+        "{}",
+        tree_of(&done)
+    );
+    assert!(
+        !tree_of(&done).contains("sel=question-panel"),
+        "approval card still showing"
+    );
 
     // 7. The composer is pinned to the bottom of the window.
     let surface = bounds_of(&done, "composer-surface").expect("composer-surface bounds");
     let viewport_h = 800.0;
     let bottom_gap = viewport_h - (surface[1] + surface[3]);
-    assert!((0.0..=60.0).contains(&bottom_gap), "composer is {bottom_gap}px from the bottom: {surface:?}");
+    assert!(
+        (0.0..=60.0).contains(&bottom_gap),
+        "composer is {bottom_gap}px from the bottom: {surface:?}"
+    );
     let input = bounds_of(&done, "composer-input").expect("composer-input bounds");
     assert!(
         (input[1] + input[3] - resting[1] - resting[3]).abs() <= 2.0,
         "composer moved: before {resting:?}, after {input:?}"
     );
-    log.push(format!("composer-surface {surface:?} bottom gap {bottom_gap}px"));
+    log.push(format!(
+        "composer-surface {surface:?} bottom gap {bottom_gap}px"
+    ));
 
     let transcript = log.join("\n");
     println!("{transcript}");

@@ -67,13 +67,38 @@ pub struct ScratchDirectories {
     repositories: PathBuf,
     shims: PathBuf,
     stub_log: PathBuf,
+    _cleanup: Option<ScratchCleanup>,
+}
+
+#[derive(Debug)]
+struct ScratchCleanup {
+    root: PathBuf,
+    creator_pid: u32,
+}
+
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        if self.creator_pid == std::process::id() {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 }
 
 impl ScratchDirectories {
     pub fn create(account_home: &Path) -> io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
+        let template = if std::env::var_os("MAST_DRIVER_ROOT").is_some() {
+            PathBuf::from(
+                std::env::var_os("TMPDIR")
+                    .ok_or_else(|| io::Error::other("missing isolated TMPDIR"))?,
+            )
+            .join("mast-drive.XXXXXX")
+        } else {
+            PathBuf::from("/private/tmp/mast-drive.XXXXXX")
+        };
         let output = std::process::Command::new("/usr/bin/mktemp")
-            .args(["-d", "/private/tmp/mast-drive.XXXXXX"])
+            .arg("-d")
+            .arg(template)
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other("could not allocate scratch root"));
@@ -81,6 +106,7 @@ impl ScratchDirectories {
         let output = String::from_utf8(output.stdout)
             .map_err(|_| io::Error::other("mktemp returned a non-UTF-8 path"))?;
         let root = PathBuf::from(output.trim());
+        let cleanup = ScratchCleanup { root: root.clone(), creator_pid: std::process::id() };
         let home = root.join("home");
         let data = root.join("data");
         let temporary = root.join("tmp");
@@ -119,11 +145,13 @@ impl ScratchDirectories {
             std::fs::write(&path, b"#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" >> \"${MAST_DRIVER_STUB_LOG:?}\"\necho 'driver: command disabled' >&2\nexit 127\n")?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         }
+        std::fs::write(shims.join("gh"), include_str!("isolation/gh_stub.sh"))?;
         Ok(Self {
             paths,
             repositories,
             shims,
             stub_log,
+            _cleanup: Some(cleanup),
         })
     }
 
@@ -154,6 +182,7 @@ impl ScratchDirectories {
             shims: base.join("shims"),
             stub_log: base.join("stub.log"),
             paths,
+            _cleanup: None,
         })
     }
 
@@ -193,13 +222,36 @@ impl ScratchDirectories {
             Path::new("/bin"),
         ])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        std::process::Command::new(self.shims.join("git"))
+        let mut command = mast_harness::git_command();
+        // Outside the isolated launcher (only repository setup tests), the
+        // harness resolves system git. Preserve the shim's log and isolation
+        // settings in that case too. Inside the sandbox git resolves to shim.
+        if command.get_program() != self.shims.join("git").as_os_str() {
+            use std::io::Write;
+            let mut log = std::fs::OpenOptions::new()
+                .append(true)
+                .open(self.git_log())?;
+            writeln!(log, "git {}", args.join(" "))?;
+        }
+        command
             .args(args)
             .current_dir(cwd)
             .env_clear()
             .env("HOME", &self.paths.home)
             .env("TMPDIR", &self.paths.temporary)
             .env("PATH", path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_AUTHOR_NAME", "Driver fixture")
+            .env("GIT_AUTHOR_EMAIL", "driver@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Driver fixture")
+            .env("GIT_COMMITTER_EMAIL", "driver@example.invalid")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+            .env("GIT_CONFIG_VALUE_0", "/dev/null")
+            .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
+            .env("GIT_CONFIG_VALUE_1", "false")
             .envs(env.iter().copied())
             .output()
     }
@@ -291,6 +343,7 @@ impl ScratchDirectories {
             .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
             .env("MAST_DRIVER_STUB_LOG", &self.stub_log)
             .env("MAST_SOAK", "1")
+            .env("MAST_DISABLE_EXTERNAL_IMPORT", "1")
             .env("MAST_SOAK_SHIM_DIR", &self.shims)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("RUST_BACKTRACE", "1")
@@ -317,16 +370,31 @@ impl ScratchDirectories {
         );
         for name in [
             ".zeron",
+            ".zeron-dev",
             ".mast",
+            ".mast-dev",
             ".claude",
+            ".claude.json",
             ".codex",
-            ".config/gh",
+            ".config",
+            ".cursor",
+            ".gemini",
+            ".ssh",
+            ".aws",
+            "Library/Application Support/Claude",
+            "Library/Application Support/devin",
             "Library/Keychains",
         ] {
+            let path = account_home.join(name);
             profile.push_str(&format!(
                 "  (subpath \"{}\")\n",
-                literal(&account_home.join(name))?
+                literal(&path)?
             ));
+            if let Ok(target) = path.canonicalize() {
+                if target != path {
+                    profile.push_str(&format!("  (subpath \"{}\")\n", literal(&target)?));
+                }
+            }
         }
         profile.push_str(")\n(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\"))\n");
         let path = self.paths.root.join("sandbox.sb");
@@ -342,6 +410,17 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn owned_scratch_is_removed_on_drop() {
+        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let root = {
+            let scratch = ScratchDirectories::create(&account).unwrap();
+            assert!(scratch.root().is_dir());
+            scratch.root().to_path_buf()
+        };
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn creates_scratch_directories_and_fail_closed_stubs() {
         let output = std::process::Command::new("/usr/bin/mktemp")
             .args(["-d", "/private/tmp/mast-driver-account-test.XXXXXX"])
@@ -352,7 +431,9 @@ mod tests {
         let scratch = ScratchDirectories::create(&account).unwrap();
         let profile = fs::read_to_string(scratch.write_sandbox_profile(&account).unwrap()).unwrap();
         assert!(profile.contains("(deny network*)"));
-        assert!(profile.contains(".claude"));
+        for name in [".claude", ".codex", ".zeron"] {
+            assert!(profile.contains(&format!("{}/{name}", account.display())));
+        }
         for program in [
             "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh",
         ] {
@@ -369,6 +450,50 @@ mod tests {
         );
         fs::remove_dir_all(&scratch.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
+    fn github_stub_only_resolves_fixture_pull_requests() {
+        let scratch = ScratchDirectories::create(Path::new("/Users")).unwrap();
+        for (number, state) in [(1, "OPEN"), (2, "CLOSED"), (3, "MERGED")] {
+            let url = format!("https://github.com/fixture/repository/pull/{number}");
+            let output = std::process::Command::new(scratch.shims.join("gh"))
+                .args(["pr", "view", &url, "--json", "state"])
+                .env_clear()
+                .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["state"], state);
+        }
+        let output = std::process::Command::new(scratch.shims.join("gh"))
+            .args(["pr", "view", "https://github.com/other/repository/pull/1"])
+            .env_clear()
+            .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let output = std::process::Command::new(scratch.shims.join("gh"))
+            .args(["driver-fixtures", "3"])
+            .env_clear()
+            .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let states: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_slice::<serde_json::Value>(line).unwrap()["state"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(states, ["OPEN", "CLOSED", "MERGED"]);
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
     }
 
     #[test]
@@ -479,8 +604,15 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
-        fs::create_dir(account.join(".claude")).unwrap();
-        fs::write(account.join(".claude/fixture"), "private").unwrap();
+        let redirected = account.join("redirected-claude");
+        fs::create_dir(&redirected).unwrap();
+        fs::create_dir(redirected.join("projects")).unwrap();
+        fs::write(redirected.join("projects/fixture"), "private").unwrap();
+        symlink(&redirected, account.join(".claude")).unwrap();
+        for name in [".codex", ".zeron"] {
+            fs::create_dir(account.join(name)).unwrap();
+            fs::write(account.join(name).join("fixture"), "private").unwrap();
+        }
         let scratch = ScratchDirectories::create(&account).unwrap();
         let profile = scratch.write_sandbox_profile(&account).unwrap();
         let result = std::process::Command::new("/usr/bin/sandbox-exec")
@@ -492,7 +624,10 @@ mod tests {
                 r#"
                 /usr/bin/touch "$DRIVER_ROOT/allowed" || exit 1
                 if /usr/bin/touch "$FAKE_ACCOUNT/denied" 2>/dev/null; then exit 2; fi
-                if /bin/cat "$FAKE_ACCOUNT/.claude/fixture" >/dev/null 2>&1; then exit 3; fi
+                if /bin/ls "$FAKE_ACCOUNT/.claude/projects" >/dev/null 2>&1; then exit 3; fi
+                if /bin/cat "$FAKE_ACCOUNT/.codex/fixture" >/dev/null 2>&1; then exit 4; fi
+                if /bin/cat "$FAKE_ACCOUNT/.zeron/fixture" >/dev/null 2>&1; then exit 5; fi
+                if /bin/cat "$FAKE_ACCOUNT/redirected-claude/projects/fixture" >/dev/null 2>&1; then exit 6; fi
             "#,
             ])
             .env_clear()

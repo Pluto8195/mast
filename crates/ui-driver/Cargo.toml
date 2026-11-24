@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 mast-harness.workspace = true
-mast-engine.workspace = true
+mast-engine = { workspace = true, features = ["ui-driver"] }
 mast-proto.workspace = true
 mast-doc.workspace = true
 mast-rpc.workspace = true
@@ -28,3 +28,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite.workspace = true
+loro.workspace = true
+libc.workspace = true

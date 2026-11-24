@@ -30,6 +30,8 @@ pub struct SpaceFixture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeFixture {
     pub space_id: String,
+    pub repository: String,
+    pub main: bool,
     pub path: String,
     pub branch: String,
     pub state: WorktreeState,
@@ -41,6 +43,7 @@ pub struct ChatFixture {
     pub title: String,
     pub space_id: String,
     pub worktree: String,
+    pub archived: bool,
     /// Transcript entries in `SessionMessageEntry` wire shape.
     pub entries: Vec<Value>,
 }
@@ -68,6 +71,8 @@ pub struct RequestFixture {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmallWorld {
+    pub preset: &'static str,
+    pub shape: Option<crate::shape::WorldShape>,
     pub seed: u64,
     pub clock_ms: i64,
     pub spaces: Vec<SpaceFixture>,
@@ -113,6 +118,8 @@ impl SmallWorld {
             .enumerate()
             .map(|(index, state)| WorktreeFixture {
                 space_id: space_id.clone(),
+                repository: "space-0".into(),
+                main: false,
                 path: format!("worktree-{index}"),
                 branch: format!("feature/fixture-{index}"),
                 state: *state,
@@ -133,6 +140,7 @@ impl SmallWorld {
                 title: (*title).into(),
                 space_id: space_id.clone(),
                 worktree: worktrees[index % worktrees.len()].path.clone(),
+                archived: false,
                 entries: transcript(index, clock_ms),
             })
             .collect();
@@ -184,6 +192,8 @@ impl SmallWorld {
             },
         ];
         Self {
+            preset: Self::PRESET,
+            shape: None,
             seed,
             clock_ms,
             spaces,
@@ -193,6 +203,182 @@ impl SmallWorld {
             requests,
         }
     }
+
+    /// Generate synthetic records for a counts-only shape.
+    pub fn shaped(
+        seed: u64,
+        preset: &'static str,
+        shape: &crate::shape::WorldShape,
+    ) -> Result<Self, String> {
+        if shape.spaces == 0
+            || shape.repositories == 0
+            || shape.chats < shape.archived_chats
+            || shape.worktrees_per_repository_median > shape.worktrees_per_repository_max
+            || shape.chats_per_space_median > shape.chats_per_space_max
+        {
+            return Err("inconsistent world shape".into());
+        }
+        let spaces: Vec<_> = (0..shape.spaces)
+            .map(|i| SpaceFixture {
+                id: format!("space-{seed:016x}-{i}"),
+                name: format!("Fixture Space {i}"),
+                repository: format!("repository-{}", i % shape.repositories),
+            })
+            .collect();
+        let mut worktrees = Vec::new();
+        for repo in 0..shape.repositories {
+            let count = if repo == 0 {
+                shape.worktrees_per_repository_max
+            } else {
+                shape.worktrees_per_repository_median
+            };
+            for index in 0..count {
+                worktrees.push(WorktreeFixture {
+                    space_id: spaces[repo % spaces.len()].id.clone(),
+                    repository: format!("repository-{repo}"),
+                    main: index == 0,
+                    path: if index == 0 {
+                        format!("../repository-{repo}")
+                    } else {
+                        format!("repo-{repo}-worktree-{index}")
+                    },
+                    branch: format!("feature/fixture-{repo}-{index}"),
+                    state: WorktreeState::Clean,
+                });
+            }
+        }
+        if worktrees.is_empty() && shape.chats > 0 {
+            return Err("world shape needs worktrees for chats".into());
+        }
+        let counts = distribute(
+            shape.spaces,
+            shape.chats,
+            shape.chats_per_space_median,
+            shape.chats_per_space_max,
+        )?;
+        let mut chats = Vec::new();
+        for (space, count) in spaces.iter().zip(counts) {
+            let repo = &space.repository;
+            let trees: Vec<_> = worktrees.iter().filter(|w| &w.repository == repo).collect();
+            if count > 0 && trees.is_empty() {
+                return Err("Space with chats has no repository worktree".into());
+            }
+            for index in 0..count {
+                let i = chats.len();
+                let messages = if i % 10 == 0 {
+                    shape.messages_per_chat_p90
+                } else {
+                    shape.messages_per_chat_median
+                };
+                chats.push(ChatFixture {
+                    id: format!("chat-{seed:016x}-{i}"),
+                    title: format!("Fixture chat {i}"),
+                    space_id: space.id.clone(),
+                    worktree: trees[index % trees.len()].path.clone(),
+                    archived: i >= shape.chats - shape.archived_chats,
+                    entries: (0..messages)
+                        .map(|n| {
+                            user(
+                                &format!("message-{n}"),
+                                "Fixture message.",
+                                EPOCH_MS + n as i64,
+                            )
+                        })
+                        .collect(),
+                });
+            }
+        }
+        let statuses = [
+            ("pending", shape.pending_items),
+            ("active", shape.active_items),
+            ("completed", shape.completed_items),
+        ];
+        let mut items = Vec::new();
+        for (status, count) in statuses {
+            for _ in 0..count {
+                let index = items.len();
+                let space_index = index % spaces.len();
+                let operation_id = format!("fixture-{seed:016x}-item-{index}");
+                items.push(ItemFixture {
+                    id: mast_proto::derive_id(&operation_id, mast_proto::roles::ITEM),
+                    operation_id,
+                    space_id: spaces[space_index].id.clone(),
+                    title: format!("Fixture item {index}"),
+                    parent: if shape.outline_depth > 1 && index >= spaces.len() {
+                        Some(if index / spaces.len() < shape.outline_depth {
+                            index - spaces.len()
+                        } else {
+                            space_index
+                        })
+                    } else {
+                        None
+                    },
+                    status,
+                });
+            }
+        }
+        let mut requests = Vec::new();
+        let count = shape.open_requests + shape.resolved_requests;
+        if count > 0 && (items.is_empty() || chats.is_empty()) {
+            return Err("requests need items and chats".into());
+        }
+        let mut first_chat = std::collections::HashMap::new();
+        for (index, chat) in chats.iter().enumerate() {
+            first_chat.entry(chat.space_id.as_str()).or_insert(index);
+        }
+        let eligible: Vec<_> = items.iter().enumerate().filter_map(|(index, item)|
+            first_chat.get(item.space_id.as_str()).map(|chat| (index, *chat))).collect();
+        if count > 0 && eligible.is_empty() {
+            return Err("requests need items in Spaces with chats".into());
+        }
+        for index in 0..count {
+            let (item, chat) = eligible[index % eligible.len()];
+            requests.push(RequestFixture {
+                item,
+                chat,
+                text: format!("Fixture request {index}?"),
+                detail: "Fixture detail.".into(),
+                answered: index >= shape.open_requests,
+            });
+        }
+        Ok(Self {
+            preset,
+            shape: Some(shape.clone()),
+            seed,
+            clock_ms: EPOCH_MS,
+            spaces,
+            worktrees,
+            chats,
+            items,
+            requests,
+        })
+    }
+}
+
+/// Build a sorted distribution with the requested total, upper median and maximum.
+fn distribute(count: usize, total: usize, median: usize, max: usize) -> Result<Vec<usize>, String> {
+    if count == 0 || median > max {
+        return Err("invalid distribution".into());
+    }
+    let middle = count / 2;
+    let mut values = vec![0; count];
+    for value in &mut values[middle..] {
+        *value = median;
+    }
+    values[count - 1] = max;
+    let mut remaining = total
+        .checked_sub(values.iter().sum())
+        .ok_or("distribution total too small")?;
+    for i in (0..middle).rev().chain((middle..count - 1).rev()) {
+        let limit = if i < middle { median } else { max };
+        let increment = remaining.min(limit - values[i]);
+        values[i] += increment;
+        remaining -= increment;
+    }
+    if remaining != 0 {
+        return Err("distribution total too large".into());
+    }
+    Ok(values)
 }
 
 fn user(id: &str, text: &str, at: i64) -> Value {
@@ -319,5 +505,61 @@ mod tests {
         for (index, item) in first.items.iter().enumerate() {
             assert!(item.parent.is_none_or(|parent| parent < index));
         }
+    }
+
+    #[test]
+    fn medium_world_matches_shape_and_seed() {
+        let shape = crate::shape::WorldShape::medium();
+        let world = SmallWorld::shaped(7, "medium", &shape).unwrap();
+        assert_eq!(world, SmallWorld::shaped(7, "medium", &shape).unwrap());
+        assert_ne!(world, SmallWorld::shaped(8, "medium", &shape).unwrap());
+        assert_eq!(world.spaces.len(), shape.spaces);
+        assert_eq!(world.chats.len(), shape.chats);
+        assert_eq!(
+            world.chats.iter().filter(|chat| chat.archived).count(),
+            shape.archived_chats
+        );
+        assert_eq!(
+            world.items.len(),
+            shape.pending_items + shape.active_items + shape.completed_items
+        );
+        assert_eq!(
+            world
+                .requests
+                .iter()
+                .filter(|request| !request.answered)
+                .count(),
+            shape.open_requests
+        );
+        let mut counts: Vec<_> = world
+            .spaces
+            .iter()
+            .map(|space| {
+                world
+                    .chats
+                    .iter()
+                    .filter(|chat| chat.space_id == space.id)
+                    .count()
+            })
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(counts[counts.len() / 2], shape.chats_per_space_median);
+        assert_eq!(*counts.last().unwrap(), shape.chats_per_space_max);
+    }
+
+    #[test]
+    fn requests_use_spaces_with_chats() {
+        let mut shape = crate::shape::WorldShape::medium();
+        shape.spaces = 3;
+        shape.repositories = 1;
+        shape.chats = 2;
+        shape.archived_chats = 0;
+        shape.chats_per_space_median = 0;
+        shape.chats_per_space_max = 2;
+        shape.pending_items = 3;
+        shape.active_items = 0;
+        shape.completed_items = 0;
+        let world = SmallWorld::shaped(1, "scale", &shape).unwrap();
+        assert!(world.requests.iter().all(|request| world.items[request.item].space_id == world.chats[request.chat].space_id));
     }
 }

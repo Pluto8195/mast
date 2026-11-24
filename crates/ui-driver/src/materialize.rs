@@ -53,61 +53,116 @@ fn git(
 /// Create the repo, a few real commits, branches and linked worktrees (some
 /// dirty, some deleted).
 pub fn materialize_repos(scratch: &ScratchDirectories, world: &SmallWorld) -> std::io::Result<()> {
-    let repo = main_repo(scratch, world);
-    std::fs::create_dir_all(&repo)?;
-    let hour = 3_600_000;
-    let at = |step: i64| world.clock_ms - 100 * hour + step * hour;
-    git(scratch, &repo, &["init", "-q", "-b", "main"], at(0))?;
-    let commits = [
-        ("README.md", "# Fixture project\n"),
-        ("src/lib.rs", "pub fn answer() -> u32 {\n    42\n}\n"),
-        ("src/layout.rs", "pub const WIDTH: u32 = 400;\n"),
-        ("docs/notes.md", "Notes for the fixture world.\n"),
-    ];
-    for (step, (path, body)) in commits.iter().enumerate() {
-        let file = repo.join(path);
-        std::fs::create_dir_all(file.parent().ok_or_else(|| other("no parent"))?)?;
-        std::fs::write(&file, body)?;
-        git(scratch, &repo, &["add", path], at(step as i64 + 1))?;
-        let message = format!("Add {path}");
-        git(
-            scratch,
-            &repo,
-            &["commit", "-q", "-m", &message],
-            at(step as i64 + 1),
-        )?;
-    }
-    for branch in ["feature/search", "fix/stale-chat"] {
-        git(scratch, &repo, &["branch", branch], at(10))?;
-    }
-    std::fs::create_dir_all(scratch.repositories().join("worktrees"))?;
-    for (index, worktree) in world.worktrees.iter().enumerate() {
-        let path = worktree_path(scratch, &worktree.path);
-        let path_text = path.to_str().ok_or_else(|| other("non-UTF-8 path"))?;
-        git(
-            scratch,
-            &repo,
-            &["worktree", "add", "-q", "-b", &worktree.branch, path_text],
-            at(20),
-        )?;
-        let step = 30 + index as i64;
-        match worktree.state {
-            WorktreeState::Clean => {}
-            WorktreeState::Dirty => {
-                std::fs::write(path.join("README.md"), "# Fixture project\n\nEdited.\n")?;
-                std::fs::write(path.join("scratch.txt"), "untracked\n")?;
+    let mut repositories: Vec<_> = world.spaces.iter().map(|s| s.repository.as_str()).collect();
+    repositories.extend(world.worktrees.iter().map(|w| w.repository.as_str()));
+    repositories.sort_unstable();
+    repositories.dedup();
+    for (repository_index, repository) in repositories.iter().enumerate() {
+        let repo = scratch.repositories().join(repository);
+        std::fs::create_dir_all(&repo)?;
+        let hour = 3_600_000;
+        let at = |step: i64| world.clock_ms - 100 * hour + step * hour;
+        git(scratch, &repo, &["init", "-q", "-b", "main"], at(0))?;
+        let commits = [
+            ("README.md", "# Fixture project\n"),
+            ("src/lib.rs", "pub fn answer() -> u32 {\n    42\n}\n"),
+            ("src/layout.rs", "pub const WIDTH: u32 = 400;\n"),
+            ("docs/notes.md", "Notes for the fixture world.\n"),
+        ];
+        for (step, (path, body)) in commits.iter().enumerate() {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().ok_or_else(|| other("no parent"))?)?;
+            std::fs::write(&file, body)?;
+            git(scratch, &repo, &["add", path], at(step as i64 + 1))?;
+            let message = format!("Add {path}");
+            git(
+                scratch,
+                &repo,
+                &["commit", "-q", "-m", &message],
+                at(step as i64 + 1),
+            )?;
+        }
+        for branch in if world.shape.is_none() {
+            vec!["feature/search", "fix/stale-chat"]
+        } else {
+            vec![]
+        } {
+            git(scratch, &repo, &["branch", branch], at(10))?;
+        }
+        std::fs::create_dir_all(scratch.repositories().join("worktrees"))?;
+        let target_branches = world.shape.as_ref().map(|shape| {
+            if repository_index == 0 {
+                shape.branches_per_repository_max
+            } else {
+                shape.branches_per_repository_median
             }
-            WorktreeState::Deleted => {
-                // The directory is inside the scratch root this code created.
-                std::fs::remove_dir_all(&path)?;
+        });
+        if target_branches == Some(0) {
+            return Err(other("a repository needs at least one branch"));
+        }
+        let mut named_branches = 1usize;
+        for (index, worktree) in world.worktrees.iter().enumerate() {
+            if worktree.repository != *repository {
+                continue;
+            }
+            if worktree.main {
+                continue;
+            }
+            let path = worktree_path(scratch, &worktree.path);
+            let path_text = path.to_str().ok_or_else(|| other("non-UTF-8 path"))?;
+            if target_branches.is_some_and(|target| named_branches >= target) {
+                git(
+                    scratch,
+                    &repo,
+                    &["worktree", "add", "-q", "--detach", path_text],
+                    at(20),
+                )?;
+            } else {
+                git(
+                    scratch,
+                    &repo,
+                    &["worktree", "add", "-q", "-b", &worktree.branch, path_text],
+                    at(20),
+                )?;
+                named_branches += 1;
+            }
+            let step = 30 + index as i64;
+            match worktree.state {
+                WorktreeState::Clean => {}
+                WorktreeState::Dirty => {
+                    std::fs::write(path.join("README.md"), "# Fixture project\n\nEdited.\n")?;
+                    std::fs::write(path.join("scratch.txt"), "untracked\n")?;
+                }
+                WorktreeState::Deleted => {
+                    // The directory is inside the scratch root this code created.
+                    std::fs::remove_dir_all(&path)?;
+                }
+            }
+            let _ = step;
+        }
+        if let Some(shape) = &world.shape {
+            let target = target_branches.expect("shaped world has branch counts");
+            let _ = shape;
+            for index in 0..target.saturating_sub(named_branches) {
+                git(
+                    scratch,
+                    &repo,
+                    &["branch", &format!("fixture-branch-{index}")],
+                    at(10),
+                )?;
             }
         }
-        let _ = step;
     }
     Ok(())
 }
 
 pub fn open_core(data: &Path) -> Result<EngineCore, String> {
+    crate::preflight()?;
+    let scratch = ScratchDirectories::from_env().map_err(|e| e.to_string())?;
+    let canonical = data.canonicalize().map_err(|e| e.to_string())?;
+    if canonical == scratch.root() || !canonical.starts_with(scratch.root()) {
+        return Err("driver engine data must be inside the sandbox scratch root".into());
+    }
     let profile = EngineProfile::local(data).map_err(|e| e.to_string())?;
     EngineCore::assemble_with_profile(
         profile,
@@ -132,17 +187,22 @@ pub async fn materialize_engine(
     world: &SmallWorld,
 ) -> Result<(), String> {
     let core = open_core(scratch.data())?;
-    let repo = main_repo(scratch, world);
-    let space = &world.spaces[0];
-    core.workspace
-        .create_space(
-            &space.id,
-            &core.device_id,
-            &repo.to_string_lossy(),
-            Some(space.name.clone()),
-            true,
-        )
-        .map_err(|e| e.to_string())?;
+    for (index, space) in world.spaces.iter().enumerate() {
+        let mut repo = scratch.repositories().join(&space.repository);
+        if world.shape.is_some() {
+            repo = repo.join("spaces").join(index.to_string());
+            std::fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
+        }
+        core.workspace
+            .create_space(
+                &space.id,
+                &core.device_id,
+                &repo.to_string_lossy(),
+                Some(space.name.clone()),
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+    }
     for chat in &world.chats {
         let cwd = worktree_path(scratch, &chat.worktree);
         core.workspace
@@ -157,6 +217,11 @@ pub async fn materialize_engine(
         core.workspace
             .rename_chat(&chat.id, &chat.title)
             .map_err(|e| e.to_string())?;
+        if chat.archived {
+            core.workspace
+                .set_chat_archived(&chat.id, true)
+                .map_err(|e| e.to_string())?;
+        }
         let handle = core.doc_host.open(&chat.id).map_err(|e| e.to_string())?;
         for entry in &chat.entries {
             let entry: mast_doc::SessionMessageEntry =
@@ -178,7 +243,38 @@ pub async fn materialize_engine(
         }
         outline(&client, params).await?;
     }
-    for (index, (chat, item)) in [(0usize, 3usize), (1, 4), (2, 8)].into_iter().enumerate() {
+    if let Some(shape) = &world.shape {
+        if shape.chat_pr_links > 0 && world.chats.is_empty() {
+            return Err("PR links need chats".into());
+        }
+        for index in 0..shape.chat_pr_links {
+            core.workspace
+                .add_chat_pr_link(
+                    &world.chats[index % world.chats.len()].id,
+                    &format!("https://github.com/fixture/repository/pull/{}", index + 1),
+                    mast_proto::ChatLinkSource::Manual,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if shape.item_pr_refs > 0 && world.items.is_empty() {
+            return Err("PR references need items".into());
+        }
+        for index in 0..shape.item_pr_refs {
+            outline(&client, json!({"op": "createWorkItemExternalReference",
+                "workItemId": world.items[index % world.items.len()].id, "provider": "github",
+                "referenceType": "pullRequest", "externalId": format!("fixture/repository#{}", index + 1),
+                "url": format!("https://github.com/fixture/repository/pull/{}", index + 1),
+                "operationId": format!("fixture-ref-{index}")})).await?;
+        }
+    }
+    for (index, (chat, item)) in (if world.shape.is_none() {
+        vec![(0usize, 3usize), (1, 4), (2, 8)]
+    } else {
+        vec![]
+    })
+    .into_iter()
+    .enumerate()
+    {
         outline(
             &client,
             json!({"op": "assignChatToWorkItem", "chatId": world.chats[chat].id,
@@ -187,8 +283,34 @@ pub async fn materialize_engine(
         )
         .await?;
     }
+    if world.shape.is_some() {
+        let mut items_by_space: std::collections::HashMap<&str, Vec<_>> =
+            std::collections::HashMap::new();
+        for item in &world.items {
+            items_by_space.entry(&item.space_id).or_default().push(item);
+        }
+        let mut positions = std::collections::HashMap::new();
+        for (index, chat) in world.chats.iter().enumerate() {
+            let Some(items) = items_by_space.get(chat.space_id.as_str()) else {
+                continue;
+            };
+            let position = positions.entry(&chat.space_id).or_insert(0usize);
+            let item = items[*position % items.len()];
+            *position += 1;
+            outline(
+                &client,
+                json!({"op": "assignChatToWorkItem", "chatId": chat.id,
+                "workItemId": item.id, "operationId": format!("fixture-assign-{index}")}),
+            )
+            .await?;
+        }
+    }
     for (index, request) in world.requests.iter().enumerate() {
-        let operation = format!("{}-request-{index}", world.items[0].operation_id);
+        let operation = if world.shape.is_some() {
+            format!("fixture-{:016x}-request-{index}", world.seed)
+        } else {
+            format!("{}-request-{index}", world.items[0].operation_id)
+        };
         let created = outline(
             &client,
             json!({"op": "createUserActionRequest", "workItemId": world.items[request.item].id,
@@ -207,6 +329,24 @@ pub async fn materialize_engine(
             .await?;
         }
     }
+    if let Some(shape) = &world.shape {
+        for index in 0..shape.friction_reports {
+            let space = &world.spaces[index % world.spaces.len()];
+            let report = serde_json::from_value(json!({
+                "id": format!("friction-{index}"), "kind": "bug", "summary": format!("Fixture report {index}"),
+                "whatHappened": "A synthetic issue occurred.", "workaround": null,
+                "suggestion": null, "approval": null, "severity": null,
+                "provenance": {"chatId": "fixture-chat", "harness": "mock", "model": null,
+                    "spaceId": space.id, "workItemId": null, "branch": null,
+                    "createdAt": world.clock_ms, "source": "agent"},
+                "fingerprint": format!("fixture-friction-{index}"), "occurrences": 1,
+                "lastSeen": world.clock_ms, "status": "open"
+            })).map_err(|e| format!("invalid fixture friction: {e}"))?;
+            core.workspace
+                .record_friction(report)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     core.shutdown().await;
     Ok(())
 }
@@ -214,6 +354,13 @@ pub async fn materialize_engine(
 /// Build the whole world: repos first (chats point at worktrees), then stores.
 pub async fn materialize(scratch: &ScratchDirectories, world: &SmallWorld) -> Result<(), String> {
     materialize_repos(scratch, world).map_err(|e| e.to_string())?;
+    if let Some(shape) = &world.shape {
+        std::fs::write(
+            scratch.data().join("driver-pr-count"),
+            shape.chat_pr_links.max(shape.item_pr_refs).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     materialize_engine(scratch, world).await
 }
 
@@ -282,42 +429,66 @@ pub fn snapshot_lines(
                 serde_json::to_string(&entry).map_err(|e| e.to_string())?
             ));
         }
+        for link in core
+            .workspace
+            .chat_pr_links(&chat.id)
+            .map_err(|e| e.to_string())?
+        {
+            lines.push(format!(
+                "chat-pr {} {} {:?}",
+                chat.id, link.url, link.source
+            ));
+        }
     }
     let service = mast_engine::work_outline::WorkOutlineService::new(core.workspace.clone());
-    let snapshot = service.snapshot(&world.spaces[0].id);
-    for item in &snapshot.items {
-        lines.push(format!(
-            "item {} parent={:?} {:?} {:?}/{:?}",
-            item.id, item.parent_work_item_id, item.title, item.status, item.effective_status
-        ));
+    for space in &world.spaces {
+        let snapshot = service.snapshot(&space.id);
+        for item in &snapshot.items {
+            lines.push(format!(
+                "item {} parent={:?} {:?} {:?}/{:?}",
+                item.id, item.parent_work_item_id, item.title, item.status, item.effective_status
+            ));
+        }
+        for assignment in &snapshot.assignments {
+            // Not the whole view: it carries the device id and a wall-clock stamp.
+            lines.push(format!(
+                "assignment {} {:?} {:?}",
+                assignment.chat_id, assignment.work_item_id, assignment.state
+            ));
+        }
+        let mut requests = snapshot.user_action_requests.clone();
+        requests.sort_by(|a, b| a.id.cmp(&b.id));
+        for request in requests {
+            lines.push(format!(
+                "request {} {:?} open={}",
+                request.id,
+                request.text,
+                request.is_open()
+            ));
+        }
+        for reference in &snapshot.external_references {
+            lines.push(format!(
+                "reference {} {} {}",
+                reference.work_item_id, reference.reference_type, reference.url
+            ));
+        }
     }
-    for assignment in &snapshot.assignments {
-        // Not the whole view: it carries the device id and a wall-clock stamp.
-        lines.push(format!(
-            "assignment {} {:?} {:?}",
-            assignment.chat_id, assignment.work_item_id, assignment.state
-        ));
-    }
-    let mut requests = snapshot.user_action_requests.clone();
-    requests.sort_by(|a, b| a.id.cmp(&b.id));
-    for request in requests {
-        lines.push(format!(
-            "request {} {:?} open={}",
-            request.id,
-            request.text,
-            request.is_open()
-        ));
-    }
-    let repo = main_repo(scratch, world);
-    for (cwd, args) in [
-        (
-            &repo,
-            vec!["for-each-ref", "--format=%(refname) %(objectname)"],
-        ),
-        (&repo, vec!["worktree", "list", "--porcelain"]),
-    ] {
-        let out = git(scratch, cwd, &args, world.clock_ms).map_err(|e| e.to_string())?;
-        lines.push(out.replace(root.to_str().unwrap_or_default(), "<root>"));
+    let mut repositories: Vec<_> = world.spaces.iter().map(|s| s.repository.as_str()).collect();
+    repositories.extend(world.worktrees.iter().map(|w| w.repository.as_str()));
+    repositories.sort_unstable();
+    repositories.dedup();
+    for repository in repositories {
+        let repo = scratch.repositories().join(repository);
+        for (cwd, args) in [
+            (
+                &repo,
+                vec!["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            (&repo, vec!["worktree", "list", "--porcelain"]),
+        ] {
+            let out = git(scratch, cwd, &args, world.clock_ms).map_err(|e| e.to_string())?;
+            lines.push(out.replace(root.to_str().unwrap_or_default(), "<root>"));
+        }
     }
     for worktree in &world.worktrees {
         let path = worktree_path(scratch, &worktree.path);

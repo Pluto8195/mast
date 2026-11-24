@@ -436,6 +436,44 @@ impl PrTicketCache {
         stale.map(Some)
     }
 
+    /// Load the driver's fixture responses without starting a network sweep.
+    #[cfg(feature = "ui-driver")]
+    pub(crate) fn load_driver_fixtures(&self, count: usize) -> Result<(), String> {
+        let shim_dir = std::env::var_os("MAST_SOAK_SHIM_DIR")
+            .ok_or("missing driver shim directory")?;
+        let expected = std::path::PathBuf::from(shim_dir).join("gh")
+            .canonicalize().map_err(|_| "missing driver gh stub")?;
+        let mut command = gh_command().ok_or("missing driver gh stub")?;
+        let program = std::path::Path::new(command.get_program()).canonicalize()
+            .map_err(|_| "invalid driver gh stub")?;
+        if program != expected {
+            return Err("gh does not resolve to the driver stub".into());
+        }
+        let output = command.args(["driver-fixtures", &count.to_string()]).output()
+            .map_err(|_| "driver gh stub failed")?;
+        if !output.status.success() {
+            return Err("driver gh stub rejected fixtures".into());
+        }
+        let mut entries = Vec::with_capacity(count);
+        for (index, line) in output.stdout.split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty()).enumerate() {
+            let value: Value = serde_json::from_slice(line).map_err(|_| "invalid driver gh response")?;
+            let url = format!("https://github.com/fixture/repository/pull/{}", index + 1);
+            if value["url"].as_str() != Some(url.as_str())
+                || value["number"].as_u64() != Some(index as u64 + 1) {
+                return Err("unexpected driver gh response".into());
+            }
+            entries.push((PrKey::Url(url), Entry {
+                data: Some(pr_json_to_status(&value)), fetched_at: Instant::now(),
+            }));
+        }
+        if entries.len() != count {
+            return Err("incomplete driver gh response".into());
+        }
+        lock(&self.inner.pr_cache).extend(entries);
+        Ok(())
+    }
+
     /// Changes after a batch of PR cache results is stored by the existing sweep.
     pub fn watch_pr_revision(&self) -> tokio::sync::watch::Receiver<PrCacheUpdate> {
         self.inner.pr_revision.subscribe()
