@@ -119,6 +119,7 @@ impl ScratchDirectories {
             std::fs::write(&path, b"#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" >> \"${MAST_DRIVER_STUB_LOG:?}\"\necho 'driver: command disabled' >&2\nexit 127\n")?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         }
+        std::fs::write(shims.join("gh"), include_str!("isolation/gh_stub.sh"))?;
         Ok(Self {
             paths,
             repositories,
@@ -369,6 +370,31 @@ mod tests {
         );
         fs::remove_dir_all(&scratch.paths.root).unwrap();
         fs::remove_dir_all(account).unwrap();
+    }
+
+    #[test]
+    fn github_stub_only_resolves_fixture_pull_requests() {
+        let scratch = ScratchDirectories::create(Path::new("/Users")).unwrap();
+        for (number, state) in [(1, "OPEN"), (2, "CLOSED"), (3, "MERGED")] {
+            let url = format!("https://github.com/fixture/repository/pull/{number}");
+            let output = std::process::Command::new(scratch.shims.join("gh"))
+                .args(["pr", "view", &url, "--json", "state"])
+                .env_clear()
+                .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["state"], state);
+        }
+        let output = std::process::Command::new(scratch.shims.join("gh"))
+            .args(["pr", "view", "https://github.com/other/repository/pull/1"])
+            .env_clear()
+            .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        fs::remove_dir_all(&scratch.paths.root).unwrap();
     }
 
     #[test]

@@ -23,7 +23,214 @@ fn rt() -> tokio::runtime::Runtime {
 
 fn finish(scratch: ScratchDirectories) {
     // The scratch root is a mktemp directory this test created.
-    std::fs::remove_dir_all(scratch.root()).unwrap();
+    for attempt in 0..20 {
+        match std::fs::remove_dir_all(scratch.root()) {
+            Ok(()) => return,
+            Err(error) if attempt < 19 && error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => panic!("could not remove driver scratch: {error}"),
+        }
+    }
+}
+
+#[test]
+fn medium_world_materializes() {
+    let rt = rt();
+    let scratch = ScratchDirectories::create(&account()).unwrap();
+    let shape = mast_ui_driver::shape::WorldShape::medium();
+    let world = SmallWorld::shaped(1, "medium", &shape).unwrap();
+    let started = std::time::Instant::now();
+    rt.block_on(async {
+        materialize::materialize(&scratch, &world).await.unwrap();
+        let core = materialize::open_core(scratch.data()).unwrap();
+        let chats = core.workspace.read_chats().unwrap();
+        let extras: Vec<_> = chats
+            .iter()
+            .filter(|chat| !world.chats.iter().any(|fixture| fixture.id == chat.id))
+            .map(|chat| &chat.id)
+            .collect();
+        assert_eq!(
+            chats.len(),
+            shape.chats,
+            "unexpected fixture chat ids: {extras:?}"
+        );
+        assert_eq!(
+            chats.iter().filter(|chat| chat.archived).count(),
+            shape.archived_chats
+        );
+        let links: usize = chats
+            .iter()
+            .map(|chat| core.workspace.chat_pr_links(&chat.id).unwrap().len())
+            .sum();
+        assert_eq!(links, shape.chat_pr_links);
+        let service = mast_engine::work_outline::WorkOutlineService::new(core.workspace.clone());
+        let snapshots: Vec<_> = world
+            .spaces
+            .iter()
+            .map(|space| service.snapshot(&space.id))
+            .collect();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.items.len())
+                .sum::<usize>(),
+            shape.pending_items + shape.active_items + shape.completed_items
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.external_references.len())
+                .sum::<usize>(),
+            shape.item_pr_refs
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .flat_map(|snapshot| &snapshot.user_action_requests)
+                .filter(|request| request.is_open())
+                .count(),
+            shape.open_requests
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .flat_map(|snapshot| &snapshot.user_action_requests)
+                .filter(|request| !request.is_open())
+                .count(),
+            shape.resolved_requests
+        );
+        assert_eq!(
+            world
+                .spaces
+                .iter()
+                .map(|space| core.workspace.friction_reports(&space.id).len())
+                .sum::<usize>(),
+            shape.friction_reports
+        );
+        core.shutdown().await;
+    });
+    eprintln!("medium materialization: {:?}", started.elapsed());
+    finish(scratch);
+}
+
+#[test]
+fn synthetic_scale_world_matches_shape_and_hash() {
+    let mut shape = mast_ui_driver::shape::WorldShape::medium();
+    shape.spaces = 3;
+    shape.repositories = 2;
+    shape.worktrees_per_repository_max = 3;
+    shape.worktrees_per_repository_median = 3;
+    shape.chats_per_space_max = 3;
+    shape.chats_per_space_median = 2;
+    shape.chats = 6;
+    shape.archived_chats = 1;
+    shape.pending_items = 3;
+    shape.active_items = 3;
+    shape.completed_items = 3;
+    shape.outline_depth = 3;
+    shape.chat_pr_links = 4;
+    shape.item_pr_refs = 3;
+    shape.open_requests = 2;
+    shape.resolved_requests = 1;
+    shape.friction_reports = 2;
+    shape.messages_per_chat_median = 2;
+    shape.messages_per_chat_p90 = 5;
+    shape.branches_per_repository_max = 4;
+    shape.branches_per_repository_median = 4;
+    let runtime = rt();
+    let hash_for = || {
+        let world = SmallWorld::shaped(9, "scale", &shape).unwrap();
+        let scratch = ScratchDirectories::create(&account()).unwrap();
+        let hash = runtime.block_on(async {
+            materialize::materialize(&scratch, &world).await.unwrap();
+            let core = materialize::open_core(scratch.data()).unwrap();
+            let service =
+                mast_engine::work_outline::WorkOutlineService::new(core.workspace.clone());
+            let snapshots: Vec<_> = world
+                .spaces
+                .iter()
+                .map(|s| service.snapshot(&s.id))
+                .collect();
+            let chats = core.workspace.read_chats().unwrap();
+            assert_eq!(chats.len(), shape.chats);
+            assert_eq!(
+                chats.iter().filter(|c| c.archived).count(),
+                shape.archived_chats
+            );
+            assert_eq!(
+                chats
+                    .iter()
+                    .map(|c| core.workspace.chat_pr_links(&c.id).unwrap().len())
+                    .sum::<usize>(),
+                shape.chat_pr_links
+            );
+            assert_eq!(snapshots.iter().map(|s| s.items.len()).sum::<usize>(), 9);
+            assert_eq!(
+                snapshots
+                    .iter()
+                    .flat_map(|s| &s.items)
+                    .map(|item| item.depth as usize + 1)
+                    .max()
+                    .unwrap(),
+                shape.outline_depth
+            );
+            assert_eq!(
+                snapshots
+                    .iter()
+                    .map(|s| s.external_references.len())
+                    .sum::<usize>(),
+                shape.item_pr_refs
+            );
+            assert_eq!(
+                snapshots
+                    .iter()
+                    .flat_map(|s| &s.user_action_requests)
+                    .filter(|r| r.is_open())
+                    .count(),
+                shape.open_requests
+            );
+            assert_eq!(
+                snapshots
+                    .iter()
+                    .flat_map(|s| &s.user_action_requests)
+                    .filter(|r| !r.is_open())
+                    .count(),
+                shape.resolved_requests
+            );
+            assert_eq!(
+                world
+                    .spaces
+                    .iter()
+                    .map(|s| core.workspace.friction_reports(&s.id).len())
+                    .sum::<usize>(),
+                shape.friction_reports
+            );
+            let hash = snapshot_hash(&scratch, &world, &core).unwrap();
+            core.shutdown().await;
+            hash
+        });
+        finish(scratch);
+        hash
+    };
+    assert_eq!(hash_for(), hash_for());
+}
+
+#[test]
+#[ignore = "requires a private shape file"]
+fn private_scale_world_materializes() {
+    let path = std::env::var_os("MAST_UI_DRIVER_SHAPE").expect("shape path required");
+    let shape: mast_ui_driver::shape::WorldShape =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let world = SmallWorld::shaped(1, "scale", &shape).unwrap();
+    let scratch = ScratchDirectories::create(&account()).unwrap();
+    let runtime = rt();
+    let started = std::time::Instant::now();
+    runtime
+        .block_on(materialize::materialize(&scratch, &world))
+        .unwrap();
+    eprintln!("scale materialization: {:?}", started.elapsed());
+    finish(scratch);
 }
 
 #[test]

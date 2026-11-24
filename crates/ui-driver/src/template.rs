@@ -88,7 +88,7 @@ impl Template {
         clone_dir(scratch.data(), &dir.join("data")).map_err(io)?;
         clone_dir(scratch.repositories(), &dir.join("repos")).map_err(io)?;
         Ok(Self {
-            preset: SmallWorld::PRESET,
+            preset: world.preset,
             seed: world.seed,
             hash,
             dir,

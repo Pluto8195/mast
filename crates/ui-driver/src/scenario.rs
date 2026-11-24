@@ -41,6 +41,8 @@ pub struct World {
     pub seed: u64,
     #[serde(default)]
     pub mock: Option<String>,
+    #[serde(default)]
+    pub shape: Option<PathBuf>,
 }
 
 fn default_preset() -> String {
@@ -50,9 +52,26 @@ fn default_seed() -> u64 {
     1
 }
 
+fn validate_preset(preset: &str, shape_available: bool) -> Result<(), String> {
+    if !["small", "medium", "scale"].contains(&preset) {
+        return Err(format!(
+            "unknown preset {preset:?}; use small, medium or scale"
+        ));
+    }
+    if preset == "scale" && !shape_available {
+        return Err("scale preset requires world.shape or MAST_UI_DRIVER_SHAPE".into());
+    }
+    Ok(())
+}
+
 impl Default for World {
     fn default() -> Self {
-        Self { preset: default_preset(), seed: 1, mock: None }
+        Self {
+            preset: default_preset(),
+            seed: 1,
+            mock: None,
+            shape: None,
+        }
     }
 }
 
@@ -197,7 +216,9 @@ fn parse_step(value: &Value) -> Result<Action, String> {
             other => Err(format!("unknown step {other:?}; known steps: {STEP_NAMES}")),
         };
     }
-    let map = value.as_mapping().ok_or("a step is a mapping like `click: \"#id\"`")?;
+    let map = value
+        .as_mapping()
+        .ok_or("a step is a mapping like `click: \"#id\"`")?;
     if map.len() != 1 {
         return Err(format!("a step has exactly one key, found {}", map.len()));
     }
@@ -217,14 +238,21 @@ fn parse_step(value: &Value) -> Result<Action, String> {
         "key" => Ok(Action::Key(string_arg(arg, key)?)),
         "type" => {
             let a: TypeArgs = serde_yaml::from_value(arg.clone()).map_err(args)?;
-            Ok(Action::Type { into: a.into, text: a.text })
+            Ok(Action::Type {
+                into: a.into,
+                text: a.text,
+            })
         }
         "scroll" => {
             let a: ScrollArgs = serde_yaml::from_value(arg.clone()).map_err(args)?;
             if a.dx == 0.0 && a.dy == 0.0 {
                 return Err("`scroll`: dx and dy are both zero".into());
             }
-            Ok(Action::Scroll { at: a.at, dx: a.dx, dy: a.dy })
+            Ok(Action::Scroll {
+                at: a.at,
+                dx: a.dx,
+                dy: a.dy,
+            })
         }
         "settle" => match arg.as_str() {
             Some("idle") => Ok(Action::Settle(Settle::Idle)),
@@ -253,7 +281,9 @@ fn validate_expect(e: &Expect) -> Result<(), String> {
         e.perf.is_some(),
     ];
     if !checks.contains(&true) {
-        return Err("`expect` has no checks (visible, not_visible, text, not_text, bounds, perf)".into());
+        return Err(
+            "`expect` has no checks (visible, not_visible, text, not_text, bounds, perf)".into(),
+        );
     }
     if (e.focused.is_some() || e.value.is_some()) && e.visible.is_none() {
         return Err("`expect`: `focused` and `value` need `visible`".into());
@@ -274,9 +304,10 @@ impl Scenario {
     /// Parse a scenario. `fallback_name` names it when the YAML has no `name`.
     pub fn parse(yaml: &str, fallback_name: &str) -> Result<Self, String> {
         let raw: Raw = serde_yaml::from_str(yaml).map_err(|e| format!("invalid scenario: {e}"))?;
-        if raw.world.preset != SmallWorld::PRESET {
-            return Err(format!("unknown preset {:?}; only \"small\" exists", raw.world.preset));
-        }
+        validate_preset(
+            &raw.world.preset,
+            raw.world.shape.is_some() || std::env::var_os("MAST_UI_DRIVER_SHAPE").is_some(),
+        )?;
         if let Some(name) = &raw.world.mock {
             serve::Config::from_json(&serde_json::json!({"mock": name}))?;
         }
@@ -299,7 +330,10 @@ impl Scenario {
 
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         Self::parse(&text, &stem).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
@@ -397,7 +431,9 @@ fn in_range(label: &str, actual: f32, [lo, hi]: [f32; 2]) -> Result<(), CheckErr
     if (lo..=hi).contains(&actual) {
         Ok(())
     } else {
-        Err(CheckError::Unmet(format!("{label} is {actual}, wanted {lo}..={hi}")))
+        Err(CheckError::Unmet(format!(
+            "{label} is {actual}, wanted {lo}..={hi}"
+        )))
     }
 }
 
@@ -409,13 +445,21 @@ fn check_frame(frame: &Frame, e: &Expect) -> Result<(), CheckError> {
         if let Some(want) = e.focused {
             let focused = frame.nodes.get(index).is_some_and(|n| n.focused);
             if focused != want {
-                return Err(CheckError::Unmet(format!("{locator} focused={focused}, wanted {want}")));
+                return Err(CheckError::Unmet(format!(
+                    "{locator} focused={focused}, wanted {want}"
+                )));
             }
         }
         if let Some(want) = &e.value {
-            let value = frame.nodes.get(index).and_then(|n| n.value.clone()).unwrap_or_default();
+            let value = frame
+                .nodes
+                .get(index)
+                .and_then(|n| n.value.clone())
+                .unwrap_or_default();
             if &value != want {
-                return Err(CheckError::Unmet(format!("{locator} value is {value:?}, wanted {want:?}")));
+                return Err(CheckError::Unmet(format!(
+                    "{locator} value is {value:?}, wanted {want:?}"
+                )));
             }
         }
     }
@@ -430,13 +474,23 @@ fn check_frame(frame: &Frame, e: &Expect) -> Result<(), CheckError> {
             Some(locator) => match locate(frame, locator)? {
                 Some(index) if index != usize::MAX => subtree_text(frame, index, &mut haystack),
                 Some(_) => {
-                    return Err(CheckError::Fatal(format!("{locator} has no a11y node to read text from")));
+                    return Err(CheckError::Fatal(format!(
+                        "{locator} has no a11y node to read text from"
+                    )));
                 }
-                None => return Err(CheckError::Unmet(format!("{locator} (within) is not visible"))),
+                None => {
+                    return Err(CheckError::Unmet(format!(
+                        "{locator} (within) is not visible"
+                    )));
+                }
             },
             None => haystack = frame.all_text(),
         }
-        let scope = e.within.as_deref().map(|w| format!(" within {w}")).unwrap_or_default();
+        let scope = e
+            .within
+            .as_deref()
+            .map(|w| format!(" within {w}"))
+            .unwrap_or_default();
         if let Some(text) = &e.text
             && !haystack.contains(text.as_str())
         {
@@ -445,11 +499,17 @@ fn check_frame(frame: &Frame, e: &Expect) -> Result<(), CheckError> {
         if let Some(text) = &e.not_text
             && haystack.contains(text.as_str())
         {
-            return Err(CheckError::Unmet(format!("text {text:?} is present{scope}")));
+            return Err(CheckError::Unmet(format!(
+                "text {text:?} is present{scope}"
+            )));
         }
     }
     for (selector, check) in &e.bounds {
-        let locator = if selector.starts_with('#') { selector.clone() } else { format!("#{selector}") };
+        let locator = if selector.starts_with('#') {
+            selector.clone()
+        } else {
+            format!("#{selector}")
+        };
         let rect = match frame.resolve_with_bounds(&locator) {
             Ok((_, rect)) => rect,
             Err(LocateError::NotFound(_)) => {
@@ -495,7 +555,10 @@ fn check_perf(perf: &Perf, timing: &Timing) -> Result<(), String> {
     if let Some(max) = perf.max_draw_ms
         && timing.draw_ms > max
     {
-        return Err(format!("perf: {:.1}ms of draw time, max {max}", timing.draw_ms));
+        return Err(format!(
+            "perf: {:.1}ms of draw time, max {max}",
+            timing.draw_ms
+        ));
     }
     Ok(())
 }
@@ -510,7 +573,10 @@ fn add(total: &mut Timing, t: &Timing) {
 
 fn agent_idle(frame: &Frame) -> bool {
     let has = |name: &str| {
-        frame.nodes.iter().any(|n| n.selector.as_deref() == Some(name))
+        frame
+            .nodes
+            .iter()
+            .any(|n| n.selector.as_deref() == Some(name))
             || frame.loose_bounds.iter().any(|(k, _)| k == name)
     };
     !has("composer-stop")
@@ -534,10 +600,16 @@ impl Runner<'_> {
 
     fn save_tree(&mut self, name: &str) {
         let frame = self.session().frame();
-        let text = format!("{}\n# regions without an a11y node\n{}", frame.render(), frame.render_selectors());
+        let text = format!(
+            "{}\n# regions without an a11y node\n{}",
+            frame.render(),
+            frame.render_selectors()
+        );
         let path = self.out.join(name);
         if std::fs::write(&path, text).is_ok() {
-            self.report.artifacts.push(path.to_string_lossy().into_owned());
+            self.report
+                .artifacts
+                .push(path.to_string_lossy().into_owned());
         }
     }
 
@@ -551,7 +623,10 @@ impl Runner<'_> {
         }
         let path = self.out.join(name);
         match self.session().png(&path) {
-            Ok(()) => self.report.artifacts.push(path.to_string_lossy().into_owned()),
+            Ok(()) => self
+                .report
+                .artifacts
+                .push(path.to_string_lossy().into_owned()),
             Err(e) => self.report.notes.push(format!("png failed: {e}")),
         }
     }
@@ -633,7 +708,10 @@ pub fn serve_scenario(
     out: &Path,
     render: bool,
 ) -> Report {
-    let mut report = Report { name: scenario.name.clone(), ..Report::default() };
+    let mut report = Report {
+        name: scenario.name.clone(),
+        ..Report::default()
+    };
     let setup = (|| -> Result<Runner<'_>, String> {
         let config = serve::Config {
             preset: scenario.world.preset.clone(),
@@ -643,7 +721,26 @@ pub fn serve_scenario(
         };
         serve::apply_mock(&config)?;
         let runtime = serve::new_runtime()?;
-        let world = SmallWorld::small(config.seed);
+        let world = match config.preset.as_str() {
+            "small" => SmallWorld::small(config.seed),
+            "medium" => {
+                SmallWorld::shaped(config.seed, "medium", &crate::shape::WorldShape::medium())?
+            }
+            "scale" => {
+                let path = scenario
+                    .world
+                    .shape
+                    .clone()
+                    .or_else(|| std::env::var_os("MAST_UI_DRIVER_SHAPE").map(PathBuf::from))
+                    .ok_or("scale preset requires a shape file")?;
+                let bytes =
+                    std::fs::read(path).map_err(|e| format!("cannot read world shape: {e}"))?;
+                let shape = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("invalid world shape: {e}"))?;
+                SmallWorld::shaped(config.seed, "scale", &shape)?
+            }
+            _ => return Err("unknown world preset".into()),
+        };
         let template = runtime.block_on(Template::build(scratch, &world))?;
         let session = serve::boot_session(scratch, &template, &world, &runtime, render)?;
         Ok(Runner {
@@ -654,7 +751,10 @@ pub fn serve_scenario(
             render,
             session: Some(session),
             out: out.to_path_buf(),
-            report: Report { name: scenario.name.clone(), ..Report::default() },
+            report: Report {
+                name: scenario.name.clone(),
+                ..Report::default()
+            },
         })
     })();
     let mut runner = match setup {
@@ -719,20 +819,50 @@ pub fn serve_scenario(
 /// Run one scenario file from outside the sandbox: allocate a scratch root,
 /// re-execute `exe` (a test binary exposing `SERVE_TEST`) inside
 /// `run_isolated`, then collect the report and artifacts into `out`.
-pub fn launch(exe: &Path, account_home: &Path, scenario_path: &Path, out: &Path, render: bool) -> Result<Report, String> {
+pub fn launch(
+    exe: &Path,
+    account_home: &Path,
+    scenario_path: &Path,
+    out: &Path,
+    render: bool,
+) -> Result<Report, String> {
     let scenario = Scenario::load(scenario_path)?; // fail on bad YAML before any sandbox
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let scratch = ScratchDirectories::create(account_home).map_err(|e| e.to_string())?;
     let ctl = serve::control_dir(scratch.root());
     std::fs::create_dir_all(ctl.join("artifacts")).map_err(|e| e.to_string())?;
+    let original = std::fs::read_to_string(scenario_path).map_err(|e| e.to_string())?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&original).map_err(|e| e.to_string())?;
+    if scenario.world.preset == "scale" {
+        let path = scenario
+            .world
+            .shape
+            .clone()
+            .or_else(|| std::env::var_os("MAST_UI_DRIVER_SHAPE").map(PathBuf::from))
+            .ok_or("scale preset requires a shape file")?;
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read world shape: {e}"))?;
+        let _: crate::shape::WorldShape =
+            serde_json::from_slice(&bytes).map_err(|e| format!("invalid world shape: {e}"))?;
+        let shape_path = ctl.join("shape.json");
+        std::fs::write(&shape_path, bytes).map_err(|e| e.to_string())?;
+        yaml["world"]["shape"] =
+            serde_yaml::Value::String(shape_path.to_string_lossy().into_owned());
+    }
     std::fs::write(
         ctl.join("scenario.yaml"),
-        std::fs::read_to_string(scenario_path).map_err(|e| e.to_string())?,
+        serde_yaml::to_string(&yaml).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     std::fs::write(ctl.join("name"), &scenario.name).map_err(|e| e.to_string())?;
-    std::fs::write(ctl.join("render"), if render { "1" } else { "0" }).map_err(|e| e.to_string())?;
-    let args = [SERVE_TEST, "--ignored", "--exact", "--test-threads=1", "--nocapture"];
+    std::fs::write(ctl.join("render"), if render { "1" } else { "0" })
+        .map_err(|e| e.to_string())?;
+    let args = [
+        SERVE_TEST,
+        "--ignored",
+        "--exact",
+        "--test-threads=1",
+        "--nocapture",
+    ];
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
     let output = scratch.run_isolated(account_home, exe, &args);
     let result = (|| -> Result<Report, String> {
@@ -769,7 +899,8 @@ pub fn launch(exe: &Path, account_home: &Path, scenario_path: &Path, out: &Path,
 pub fn serve_from_control() -> Result<(), String> {
     let scratch = ScratchDirectories::from_env().map_err(|e| e.to_string())?;
     let ctl = serve::control_dir(scratch.root());
-    let read = |name: &str| std::fs::read_to_string(ctl.join(name)).map_err(|e| format!("{name}: {e}"));
+    let read =
+        |name: &str| std::fs::read_to_string(ctl.join(name)).map_err(|e| format!("{name}: {e}"));
     let name = read("name")?;
     let scenario = Scenario::parse(&read("scenario.yaml")?, &name)?;
     let render = read("render")?.trim() == "1";
@@ -799,6 +930,16 @@ pub fn scenario_files(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn scale_requires_a_shape() {
+        assert!(
+            validate_preset("scale", false)
+                .unwrap_err()
+                .contains("requires")
+        );
+        assert!(validate_preset("scale", true).is_ok());
+    }
+
     const GOOD: &str = r##"
 world: { preset: small, seed: 7, mock: approval }
 screenshot: on-fail
@@ -826,19 +967,41 @@ steps:
     #[test]
     fn parses_every_step_kind() {
         let s = Scenario::parse(GOOD, "t").unwrap();
-        assert_eq!(s.world, World { preset: "small".into(), seed: 7, mock: Some("approval".into()) });
+        assert_eq!(
+            s.world,
+            World {
+                preset: "small".into(),
+                seed: 7,
+                mock: Some("approval".into()),
+                shape: None
+            }
+        );
         assert_eq!(s.screenshot, Screenshot::OnFail);
         assert_eq!(s.steps.len(), 10);
-        assert_eq!(s.steps[0].action, Action::Open { chat: "Review the workspace".into() });
+        assert_eq!(
+            s.steps[0].action,
+            Action::Open {
+                chat: "Review the workspace".into()
+            }
+        );
         assert_eq!(s.steps[4].action, Action::Key("cmd-k".into()));
         assert_eq!(
             s.steps[6].action,
-            Action::Scroll { at: "#transcript-region".into(), dx: 0.0, dy: -300.0 }
+            Action::Scroll {
+                at: "#transcript-region".into(),
+                dx: 0.0,
+                dy: -300.0
+            }
         );
         assert_eq!(s.steps[7].action, Action::Settle(Settle::Idle));
         assert_eq!(s.steps[8].action, Action::Reset);
-        let Action::Expect(e) = &s.steps[9].action else { panic!("expect") };
-        assert_eq!(e.bounds["#composer-surface"].bottom_edge_within, Some([0.0, 60.0]));
+        let Action::Expect(e) = &s.steps[9].action else {
+            panic!("expect")
+        };
+        assert_eq!(
+            e.bounds["#composer-surface"].bottom_edge_within,
+            Some([0.0, 60.0])
+        );
         assert_eq!(e.perf.as_ref().unwrap().max_draws, Some(24));
         assert_eq!(s.name, "t");
     }
@@ -894,20 +1057,54 @@ steps:
         assert!(err("steps:\n  - expect: {}").contains("no checks"));
         assert!(err("steps:\n  - expect: {focused: true}").contains("no checks"));
         assert!(err("steps:\n  - expect: {text: a, focused: true}").contains("need `visible`"));
-        assert!(err("steps:\n  - expect: {visible: \"#a\", within: \"#b\"}").contains("`within` needs"));
+        assert!(
+            err("steps:\n  - expect: {visible: \"#a\", within: \"#b\"}").contains("`within` needs")
+        );
         assert!(err("steps:\n  - expect: {perf: {}}").contains("max_draws or max_draw_ms"));
         assert!(err("steps:\n  - expect: {visible: \"#a\", bogus: 1}").contains("bogus"));
-        assert!(
-            err("steps:\n  - expect: {bounds: {\"#a\": {middle: [0, 1]}}}").contains("middle")
-        );
+        assert!(err("steps:\n  - expect: {bounds: {\"#a\": {middle: [0, 1]}}}").contains("middle"));
     }
 
     #[test]
     fn perf_check_excludes_animated_draws() {
-        let t = Timing { draws: 30, animated: 10, draw_ms: 50.0, ..Timing::default() };
-        assert!(check_perf(&Perf { max_draws: Some(20), max_draw_ms: Some(100.0) }, &t).is_ok());
-        assert!(check_perf(&Perf { max_draws: Some(19), max_draw_ms: None }, &t).unwrap_err().contains("20 draws"));
-        assert!(check_perf(&Perf { max_draws: None, max_draw_ms: Some(10.0) }, &t).unwrap_err().contains("draw time"));
+        let t = Timing {
+            draws: 30,
+            animated: 10,
+            draw_ms: 50.0,
+            ..Timing::default()
+        };
+        assert!(
+            check_perf(
+                &Perf {
+                    max_draws: Some(20),
+                    max_draw_ms: Some(100.0)
+                },
+                &t
+            )
+            .is_ok()
+        );
+        assert!(
+            check_perf(
+                &Perf {
+                    max_draws: Some(19),
+                    max_draw_ms: None
+                },
+                &t
+            )
+            .unwrap_err()
+            .contains("20 draws")
+        );
+        assert!(
+            check_perf(
+                &Perf {
+                    max_draws: None,
+                    max_draw_ms: Some(10.0)
+                },
+                &t
+            )
+            .unwrap_err()
+            .contains("draw time")
+        );
     }
 
     #[test]

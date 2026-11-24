@@ -5,9 +5,12 @@
 #![cfg(target_os = "macos")]
 use std::sync::Arc;
 
+// GPUI's platform state is process-wide; simultaneous headless contexts abort.
+static HEADLESS_CONTEXT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use gpui::{
-    AnyWindowHandle, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PlatformInput, px, size,
+    AnyWindowHandle, HeadlessAppContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PlatformInput, px, size,
 };
 use mast_ui::{
     theme::{Appearance, Theme},
@@ -84,6 +87,7 @@ fn draw(cx: &mut HeadlessAppContext, h: AnyWindowHandle) {
 
 #[test]
 fn dump_tree_and_bounds() {
+    let _guard = HEADLESS_CONTEXT.lock().unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _g = rt.enter();
     let data = tempfile::tempdir().unwrap();
@@ -168,6 +172,7 @@ fn selectors(cx: &mut HeadlessAppContext, h: AnyWindowHandle) -> Vec<String> {
 
 #[test]
 fn click_element_by_locator() {
+    let _guard = HEADLESS_CONTEXT.lock().unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _g = rt.enter();
     let data = tempfile::tempdir().unwrap();

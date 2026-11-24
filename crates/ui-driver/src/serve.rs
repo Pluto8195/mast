@@ -36,7 +36,9 @@ fn mock_knob(name: &str) -> Result<&'static str, String> {
         "approval" => Ok("MAST_MOCK_APPROVAL"),
         "question" => Ok("MAST_MOCK_QUESTION"),
         "error" => Ok("MAST_MOCK_ERROR"),
-        other => Err(format!("unknown mock {other:?}; use approval, question or error")),
+        other => Err(format!(
+            "unknown mock {other:?}; use approval, question or error"
+        )),
     }
 }
 
@@ -46,8 +48,10 @@ impl Config {
     }
     pub fn from_json(value: &Value) -> Result<Self, String> {
         let preset = value["preset"].as_str().unwrap_or("small").to_owned();
-        if preset != SmallWorld::PRESET {
-            return Err(format!("unknown preset {preset:?}; only \"small\" exists"));
+        if !["small", "medium", "scale"].contains(&preset.as_str()) {
+            return Err(format!(
+                "unknown preset {preset:?}; use small, medium or scale"
+            ));
         }
         Ok(Self {
             preset,
@@ -96,7 +100,9 @@ fn handle(session: &mut Session, ctl: &Path, request: &Value) -> (Value, bool) {
         "tree" => Ok(Some(session.settle())),
         "click" => session.click(locator).map(Some),
         "type" => session.type_text(locator, text).map(Some),
-        "key" => session.key(request["chord"].as_str().unwrap_or("")).map(Some),
+        "key" => session
+            .key(request["chord"].as_str().unwrap_or(""))
+            .map(Some),
         "png" => {
             let path = ctl.join("step.png");
             session.settle();
@@ -195,7 +201,13 @@ pub fn boot_session(
         core.shutdown().await;
         rows
     })?;
-    Session::open(scratch.data(), template.header(), rows, runtime.clone(), render)
+    Session::open(
+        scratch.data(),
+        template.header(),
+        rows,
+        runtime.clone(),
+        render,
+    )
 }
 
 /// The serve loop on an already validated scratch root.
@@ -208,7 +220,18 @@ pub fn serve_in(scratch: &ScratchDirectories) -> Result<(), String> {
     let config = Config::from_json(&config)?;
     apply_mock(&config)?;
     let runtime = new_runtime()?;
-    let world = SmallWorld::small(config.seed);
+    let world = match config.preset.as_str() {
+        "small" => SmallWorld::small(config.seed),
+        "medium" => SmallWorld::shaped(config.seed, "medium", &crate::shape::WorldShape::medium())?,
+        "scale" => {
+            let bytes = std::fs::read(ctl.join("shape.json"))
+                .map_err(|_| "scale preset requires MAST_UI_DRIVER_SHAPE")?;
+            let shape =
+                serde_json::from_slice(&bytes).map_err(|e| format!("invalid world shape: {e}"))?;
+            SmallWorld::shaped(config.seed, "scale", &shape)?
+        }
+        _ => return Err("unknown world preset".into()),
+    };
     let template = runtime.block_on(Template::build(scratch, &world))?;
     let mut session = boot_session(scratch, &template, &world, &runtime, config.render)?;
     let first = json!({

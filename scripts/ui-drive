@@ -155,6 +155,10 @@ def start(args):
             die(f"unknown start option {flag}", 2)
     if not seed.isdigit():
         die("--seed must be a number", 2)
+    if preset not in ("small", "medium", "scale"):
+        die("--preset must be small, medium or scale", 2)
+    if preset == "scale" and not os.environ.get("MAST_UI_DRIVER_SHAPE"):
+        die("scale preset requires MAST_UI_DRIVER_SHAPE", 2)
     pid = session_pid()
     if pid and pid_alive(pid):
         die(f"a driver is already running (pid {pid}); `scripts/ui-drive stop` first")
@@ -172,6 +176,8 @@ def start(args):
         environment["MAST_DRIVE_RENDER"] = "1"
     if mock:
         environment["MAST_DRIVE_MOCK"] = mock
+    if preset == "scale":
+        environment["MAST_UI_DRIVER_SHAPE"] = os.environ["MAST_UI_DRIVER_SHAPE"]
     launcher = subprocess.Popen(
         [executable, "--ignored", "--exact", "drive_launcher", "--test-threads=1"],
         env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,

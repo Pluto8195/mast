@@ -129,7 +129,16 @@ fn extract() -> Result<(), Box<dyn std::error::Error>> {
         outline_depth: 0,
         chat_pr_links: chats
             .iter()
-            .map(|c| registry.chat_pr_links(&c.id).len())
+            .map(|chat| {
+                let links = registry.chat_pr_links(&chat.id);
+                let legacy = match (&chat.linked_pr_url, &chat.linked_pr_source) {
+                    (Some(url), Some(_)) => {
+                        !links.iter().any(|link| link.url.eq_ignore_ascii_case(url))
+                    }
+                    _ => false,
+                };
+                links.len() + usize::from(legacy)
+            })
             .sum(),
         item_pr_refs: 0,
         open_requests: 0,
