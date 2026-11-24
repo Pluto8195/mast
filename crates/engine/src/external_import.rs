@@ -998,7 +998,9 @@ impl ExternalSessionImporter {
     /// callers (e.g. subagent scanning) treat that as "nothing to scan",
     /// not an error.
     pub fn transcript_path_for(&self, chat_id: &str) -> Result<Option<PathBuf>, EngineError> {
-        self.require_enabled()?;
+        if !self.enabled {
+            return Ok(None);
+        }
         Ok(self
             .read_cursor(chat_id)?
             .map(|c| PathBuf::from(c.transcript_path)))

@@ -41,16 +41,13 @@ fn drive_launcher() {
         .unwrap_or(1);
     let preset = std::env::var("MAST_DRIVE_PRESET").unwrap_or_else(|_| "small".into());
     let render = std::env::var_os("MAST_DRIVE_RENDER").is_some();
+    let shape = mast_ui_driver::scenario::World { preset: preset.clone(), seed, mock: None, shape: None }
+        .shape_bytes().expect("invalid world shape");
     let account = account_home();
     let scratch = ScratchDirectories::create(&account).expect("scratch");
     let ctl = serve::control_dir(scratch.root());
     std::fs::create_dir(&ctl).unwrap();
-    if preset == "scale" {
-        let shape = std::env::var_os("MAST_UI_DRIVER_SHAPE")
-            .expect("scale preset requires MAST_UI_DRIVER_SHAPE");
-        let bytes = std::fs::read(shape).expect("cannot read world shape");
-        let _: mast_ui_driver::shape::WorldShape =
-            serde_json::from_slice(&bytes).expect("invalid world shape");
+    if let Some(bytes) = shape {
         std::fs::write(ctl.join("shape.json"), bytes).unwrap();
     }
     let config = serve::Config {

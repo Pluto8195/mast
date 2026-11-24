@@ -75,6 +75,19 @@ impl Default for World {
     }
 }
 
+impl World {
+    /// Read and validate private scale dimensions before allocating scratch.
+    pub fn shape_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        if self.preset != "scale" { return Ok(None); }
+        let path = self.shape.clone().or_else(|| std::env::var_os("MAST_UI_DRIVER_SHAPE").map(PathBuf::from))
+            .ok_or("scale preset requires world.shape or MAST_UI_DRIVER_SHAPE")?;
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read world shape: {e}"))?;
+        let shape = serde_json::from_slice(&bytes).map_err(|e| format!("invalid world shape: {e}"))?;
+        SmallWorld::shaped(self.seed, "scale", &shape)?;
+        Ok(Some(bytes))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum Screenshot {
     #[default]
@@ -827,22 +840,14 @@ pub fn launch(
     render: bool,
 ) -> Result<Report, String> {
     let scenario = Scenario::load(scenario_path)?; // fail on bad YAML before any sandbox
+    let shape = scenario.world.shape_bytes()?;
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let scratch = ScratchDirectories::create(account_home).map_err(|e| e.to_string())?;
     let ctl = serve::control_dir(scratch.root());
     std::fs::create_dir_all(ctl.join("artifacts")).map_err(|e| e.to_string())?;
     let original = std::fs::read_to_string(scenario_path).map_err(|e| e.to_string())?;
     let mut yaml: serde_yaml::Value = serde_yaml::from_str(&original).map_err(|e| e.to_string())?;
-    if scenario.world.preset == "scale" {
-        let path = scenario
-            .world
-            .shape
-            .clone()
-            .or_else(|| std::env::var_os("MAST_UI_DRIVER_SHAPE").map(PathBuf::from))
-            .ok_or("scale preset requires a shape file")?;
-        let bytes = std::fs::read(path).map_err(|e| format!("cannot read world shape: {e}"))?;
-        let _: crate::shape::WorldShape =
-            serde_json::from_slice(&bytes).map_err(|e| format!("invalid world shape: {e}"))?;
+    if let Some(bytes) = shape {
         let shape_path = ctl.join("shape.json");
         std::fs::write(&shape_path, bytes).map_err(|e| e.to_string())?;
         yaml["world"]["shape"] =
@@ -938,6 +943,18 @@ mod tests {
                 .contains("requires")
         );
         assert!(validate_preset("scale", true).is_ok());
+    }
+
+    #[test]
+    fn invalid_scale_shape_fails_before_scratch_or_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let shape = dir.path().join("shape.json");
+        std::fs::write(&shape, b"{}").unwrap();
+        let scenario = dir.path().join("scenario.yaml");
+        std::fs::write(&scenario, format!("world: {{ preset: scale, shape: '{}' }}\nsteps:\n  - settle\n", shape.display())).unwrap();
+        let out = dir.path().join("output");
+        assert!(launch(&std::env::current_exe().unwrap(), dir.path(), &scenario, &out, false).is_err());
+        assert!(!out.exists());
     }
 
     const GOOD: &str = r##"

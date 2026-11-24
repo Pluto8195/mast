@@ -107,7 +107,7 @@ fn driver_disables_external_session_import() {
         disabled(importer.repair_missing_titles(&core.context_usage).err());
         disabled(importer.repair_junk_imports().err());
         disabled(importer.repair_missing_links(&core.context_usage).err());
-        disabled(importer.transcript_path_for("fixture").err());
+        assert!(importer.transcript_path_for("fixture").unwrap().is_none());
         disabled(importer.auto_adopt_external_sessions().err());
         disabled(importer.bulk_import_from_session_canvas(|_| {}).err());
         core.shutdown().await;
@@ -276,9 +276,9 @@ fn synthetic_scale_world_matches_shape_and_hash() {
     }
     let mut shape = mast_ui_driver::shape::WorldShape::medium();
     shape.spaces = 3;
-    shape.repositories = 2;
+    shape.repositories = 3;
     shape.worktrees_per_repository_max = 3;
-    shape.worktrees_per_repository_median = 3;
+    shape.worktrees_per_repository_median = 2;
     shape.chats_per_space_max = 3;
     shape.chats_per_space_median = 2;
     shape.chats = 6;
@@ -295,7 +295,7 @@ fn synthetic_scale_world_matches_shape_and_hash() {
     shape.messages_per_chat_median = 2;
     shape.messages_per_chat_p90 = 5;
     shape.branches_per_repository_max = 4;
-    shape.branches_per_repository_median = 4;
+    shape.branches_per_repository_median = 3;
     let runtime = rt();
     let hash_for = || {
         let world = SmallWorld::shaped(9, "scale", &shape).unwrap();
@@ -312,6 +312,10 @@ fn synthetic_scale_world_matches_shape_and_hash() {
                 .collect();
             let chats = core.workspace.read_chats().unwrap();
             assert_eq!(chats.len(), shape.chats);
+            let mut messages: Vec<_> = chats.iter().map(|chat| core.doc_host.open(&chat.id).unwrap().doc().read_entries().unwrap().len()).collect();
+            messages.sort_unstable();
+            assert_eq!(messages[messages.len() / 2], shape.messages_per_chat_median);
+            assert_eq!(messages[((messages.len() - 1) * 9).div_ceil(10)], shape.messages_per_chat_p90);
             assert_eq!(
                 chats.iter().filter(|c| c.archived).count(),
                 shape.archived_chats
@@ -382,24 +386,18 @@ fn synthetic_scale_world_matches_shape_and_hash() {
             core.shutdown().await;
             hash
         });
-        let mut messages: Vec<_> = world.chats.iter().map(|chat| chat.entries.len()).collect();
-        messages.sort_unstable();
-        assert_eq!(messages[messages.len() / 2], shape.messages_per_chat_median);
-        assert_eq!(
-            messages[((messages.len() - 1) * 9).div_ceil(10)],
-            shape.messages_per_chat_p90
-        );
+        let mut worktree_counts = Vec::new();
+        let mut branch_counts = Vec::new();
         for repo in 0..shape.repositories {
             let cwd = scratch.repositories().join(format!("repository-{repo}"));
             let worktrees = scratch
                 .git(&cwd, &["worktree", "list", "--porcelain"], &[])
                 .unwrap();
-            assert_eq!(
+            worktree_counts.push(
                 String::from_utf8_lossy(&worktrees.stdout)
                     .lines()
                     .filter(|line| line.starts_with("worktree "))
-                    .count(),
-                shape.worktrees_per_repository_median
+                    .count()
             );
             let branches = scratch
                 .git(
@@ -408,11 +406,14 @@ fn synthetic_scale_world_matches_shape_and_hash() {
                     &[],
                 )
                 .unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&branches.stdout).lines().count(),
-                shape.branches_per_repository_median
-            );
+            branch_counts.push(String::from_utf8_lossy(&branches.stdout).lines().count());
         }
+        worktree_counts.sort_unstable();
+        branch_counts.sort_unstable();
+        assert_eq!(worktree_counts[worktree_counts.len() / 2], shape.worktrees_per_repository_median);
+        assert_eq!(*worktree_counts.last().unwrap(), shape.worktrees_per_repository_max);
+        assert_eq!(branch_counts[branch_counts.len() / 2], shape.branches_per_repository_median);
+        assert_eq!(*branch_counts.last().unwrap(), shape.branches_per_repository_max);
         finish(scratch);
         hash
     };

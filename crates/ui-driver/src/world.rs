@@ -322,12 +322,17 @@ impl SmallWorld {
         if count > 0 && (items.is_empty() || chats.is_empty()) {
             return Err("requests need items and chats".into());
         }
+        let mut first_chat = std::collections::HashMap::new();
+        for (index, chat) in chats.iter().enumerate() {
+            first_chat.entry(chat.space_id.as_str()).or_insert(index);
+        }
+        let eligible: Vec<_> = items.iter().enumerate().filter_map(|(index, item)|
+            first_chat.get(item.space_id.as_str()).map(|chat| (index, *chat))).collect();
+        if count > 0 && eligible.is_empty() {
+            return Err("requests need items in Spaces with chats".into());
+        }
         for index in 0..count {
-            let item = index % items.len();
-            let chat = chats
-                .iter()
-                .position(|c| c.space_id == items[item].space_id)
-                .ok_or("request Space has no chat")?;
+            let (item, chat) = eligible[index % eligible.len()];
             requests.push(RequestFixture {
                 item,
                 chat,
@@ -540,5 +545,21 @@ mod tests {
         counts.sort_unstable();
         assert_eq!(counts[counts.len() / 2], shape.chats_per_space_median);
         assert_eq!(*counts.last().unwrap(), shape.chats_per_space_max);
+    }
+
+    #[test]
+    fn requests_use_spaces_with_chats() {
+        let mut shape = crate::shape::WorldShape::medium();
+        shape.spaces = 3;
+        shape.repositories = 1;
+        shape.chats = 2;
+        shape.archived_chats = 0;
+        shape.chats_per_space_median = 0;
+        shape.chats_per_space_max = 2;
+        shape.pending_items = 3;
+        shape.active_items = 0;
+        shape.completed_items = 0;
+        let world = SmallWorld::shaped(1, "scale", &shape).unwrap();
+        assert!(world.requests.iter().all(|request| world.items[request.item].space_id == world.chats[request.chat].space_id));
     }
 }

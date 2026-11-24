@@ -67,6 +67,21 @@ pub struct ScratchDirectories {
     repositories: PathBuf,
     shims: PathBuf,
     stub_log: PathBuf,
+    _cleanup: Option<ScratchCleanup>,
+}
+
+#[derive(Debug)]
+struct ScratchCleanup {
+    root: PathBuf,
+    creator_pid: u32,
+}
+
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        if self.creator_pid == std::process::id() {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 }
 
 impl ScratchDirectories {
@@ -91,6 +106,7 @@ impl ScratchDirectories {
         let output = String::from_utf8(output.stdout)
             .map_err(|_| io::Error::other("mktemp returned a non-UTF-8 path"))?;
         let root = PathBuf::from(output.trim());
+        let cleanup = ScratchCleanup { root: root.clone(), creator_pid: std::process::id() };
         let home = root.join("home");
         let data = root.join("data");
         let temporary = root.join("tmp");
@@ -135,6 +151,7 @@ impl ScratchDirectories {
             repositories,
             shims,
             stub_log,
+            _cleanup: Some(cleanup),
         })
     }
 
@@ -165,6 +182,7 @@ impl ScratchDirectories {
             shims: base.join("shims"),
             stub_log: base.join("stub.log"),
             paths,
+            _cleanup: None,
         })
     }
 
@@ -352,16 +370,31 @@ impl ScratchDirectories {
         );
         for name in [
             ".zeron",
+            ".zeron-dev",
             ".mast",
+            ".mast-dev",
             ".claude",
+            ".claude.json",
             ".codex",
-            ".config/gh",
+            ".config",
+            ".cursor",
+            ".gemini",
+            ".ssh",
+            ".aws",
+            "Library/Application Support/Claude",
+            "Library/Application Support/devin",
             "Library/Keychains",
         ] {
+            let path = account_home.join(name);
             profile.push_str(&format!(
                 "  (subpath \"{}\")\n",
-                literal(&account_home.join(name))?
+                literal(&path)?
             ));
+            if let Ok(target) = path.canonicalize() {
+                if target != path {
+                    profile.push_str(&format!("  (subpath \"{}\")\n", literal(&target)?));
+                }
+            }
         }
         profile.push_str(")\n(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\"))\n");
         let path = self.paths.root.join("sandbox.sb");
@@ -375,6 +408,17 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn owned_scratch_is_removed_on_drop() {
+        let account = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let root = {
+            let scratch = ScratchDirectories::create(&account).unwrap();
+            assert!(scratch.root().is_dir());
+            scratch.root().to_path_buf()
+        };
+        assert!(!root.exists());
+    }
 
     #[test]
     fn creates_scratch_directories_and_fail_closed_stubs() {
@@ -560,7 +604,12 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
-        for name in [".claude", ".codex", ".zeron"] {
+        let redirected = account.join("redirected-claude");
+        fs::create_dir(&redirected).unwrap();
+        fs::create_dir(redirected.join("projects")).unwrap();
+        fs::write(redirected.join("projects/fixture"), "private").unwrap();
+        symlink(&redirected, account.join(".claude")).unwrap();
+        for name in [".codex", ".zeron"] {
             fs::create_dir(account.join(name)).unwrap();
             fs::write(account.join(name).join("fixture"), "private").unwrap();
         }
@@ -575,9 +624,10 @@ mod tests {
                 r#"
                 /usr/bin/touch "$DRIVER_ROOT/allowed" || exit 1
                 if /usr/bin/touch "$FAKE_ACCOUNT/denied" 2>/dev/null; then exit 2; fi
-                if /bin/cat "$FAKE_ACCOUNT/.claude/fixture" >/dev/null 2>&1; then exit 3; fi
+                if /bin/ls "$FAKE_ACCOUNT/.claude/projects" >/dev/null 2>&1; then exit 3; fi
                 if /bin/cat "$FAKE_ACCOUNT/.codex/fixture" >/dev/null 2>&1; then exit 4; fi
                 if /bin/cat "$FAKE_ACCOUNT/.zeron/fixture" >/dev/null 2>&1; then exit 5; fi
+                if /bin/cat "$FAKE_ACCOUNT/redirected-claude/projects/fixture" >/dev/null 2>&1; then exit 6; fi
             "#,
             ])
             .env_clear()

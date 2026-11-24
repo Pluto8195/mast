@@ -14,7 +14,7 @@ The switch disables external-session import and its background repair jobs;
 the sandbox also denies reads of the account's live stores.
 
 ```sh
-SHAPE_DIR=$(mktemp -d -m 700 /private/tmp/ui-driver-shape.XXXXXX)
+SHAPE_DIR=$(umask 077; mktemp -d /private/tmp/ui-driver-shape.XXXXXX)
 sqlite3 -readonly "$HOME/.zeron/profiles/local/docs.sqlite3" ".backup $SHAPE_DIR/docs.sqlite3"
 MAST_SHAPE_SOURCE="$SHAPE_DIR/docs.sqlite3" \
   MAST_SHAPE_OUTPUT="$SHAPE_DIR/shape.json" \
