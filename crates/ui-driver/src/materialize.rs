@@ -158,6 +158,11 @@ pub fn materialize_repos(scratch: &ScratchDirectories, world: &SmallWorld) -> st
 
 pub fn open_core(data: &Path) -> Result<EngineCore, String> {
     crate::preflight()?;
+    let scratch = ScratchDirectories::from_env().map_err(|e| e.to_string())?;
+    let canonical = data.canonicalize().map_err(|e| e.to_string())?;
+    if canonical == scratch.root() || !canonical.starts_with(scratch.root()) {
+        return Err("driver engine data must be inside the sandbox scratch root".into());
+    }
     let profile = EngineProfile::local(data).map_err(|e| e.to_string())?;
     EngineCore::assemble_with_profile(
         profile,

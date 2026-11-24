@@ -12,20 +12,28 @@ static ISOLATED_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn engine_open_rejects_unguarded_process() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            "unguarded_engine_open",
-            "--nocapture",
-        ])
-        .env_clear()
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "unguarded engine rejection test failed"
-    );
+    for spoofed in [false, true] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "unguarded_engine_open",
+                "--nocapture",
+            ])
+            .env_clear();
+        if spoofed {
+            command
+                .env("MAST_SOAK", "1")
+                .env("MAST_SOAK_SHIM_DIR", "/nonexistent/mast-driver-shims")
+                .env("PATH", "/usr/bin:/bin");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "unguarded engine rejection test failed"
+        );
+    }
 }
 
 #[test]
@@ -36,7 +44,7 @@ fn unguarded_engine_open() {
         Ok(_) => panic!("unguarded engine unexpectedly started"),
         Err(error) => error,
     };
-    assert!(error.contains("MAST_SOAK=1"));
+    assert!(error.contains("MAST_SOAK=1") || error.contains("soak guard"));
     assert!(!dir.path().join("profiles").exists());
 }
 
