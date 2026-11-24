@@ -14,16 +14,18 @@ The switch disables external-session import and its background repair jobs;
 the sandbox also denies reads of the account's live stores.
 
 ```sh
-mkdir -p /private/tmp/ui-driver-shape
-sqlite3 -readonly "$HOME/.zeron/profiles/local/docs.sqlite3" '.backup /private/tmp/ui-driver-shape/docs.sqlite3'
-MAST_SHAPE_SOURCE=/private/tmp/ui-driver-shape/docs.sqlite3 \
-  MAST_SHAPE_OUTPUT="$SHAPE_FILE" \
+SHAPE_DIR=$(mktemp -d -m 700 /private/tmp/ui-driver-shape.XXXXXX)
+sqlite3 -readonly "$HOME/.zeron/profiles/local/docs.sqlite3" ".backup $SHAPE_DIR/docs.sqlite3"
+MAST_SHAPE_SOURCE="$SHAPE_DIR/docs.sqlite3" \
+  MAST_SHAPE_OUTPUT="$SHAPE_DIR/shape.json" \
   cargo test -p mast-ui-driver --test extract_shape -- --ignored --exact extract_shape_from_backup
+cp "$SHAPE_DIR/shape.json" "$SHAPE_FILE"
 ```
 
 Supply the shape with `world.shape` in a scenario or with
 `MAST_UI_DRIVER_SHAPE`. For example, use `world: { preset: scale, seed: 1 }`
 and run `MAST_UI_DRIVER_SHAPE="$SHAPE_FILE" scripts/ui-drive run "$SCENARIO"`.
-Set both variables to private local paths first. Scale scenarios are excluded from release
+The extractor removes the backup on success and refuses output in a Git work
+tree. Set both variables to private local paths first. Scale scenarios are excluded from release
 runs. The driver copies the counts into its isolated scratch directory before
 starting; it does not grant the sandbox access to the source file.

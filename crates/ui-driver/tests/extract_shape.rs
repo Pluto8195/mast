@@ -1,6 +1,7 @@
 //! Explicitly invoked local shape extraction from a SQLite backup.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use mast_doc::{REGISTRY_DOC_ID, RegistryDoc, SessionDoc};
 use mast_proto::work_outline::WorkItemStatus;
@@ -31,7 +32,7 @@ fn git(path: &Path, args: &[&str]) -> Option<String> {
 
 // A linked worktree can point its .git file at a different directory. Check
 // that pointer before invoking git, so it cannot open the live Mast store.
-fn safe_repository(path: &Path, live_store: &Path) -> bool {
+fn safe_repository(path: &Path, live_stores: &[PathBuf]) -> bool {
     for ancestor in path.ancestors() {
         let dot_git = ancestor.join(".git");
         let Ok(metadata) = std::fs::symlink_metadata(&dot_git) else {
@@ -51,20 +52,119 @@ fn safe_repository(path: &Path, live_store: &Path) -> bool {
         let Ok(git_dir) = git_dir.canonicalize() else {
             return false;
         };
-        if git_dir.starts_with(live_store) {
+        if live_stores.iter().any(|store| git_dir.starts_with(store)) {
             return false;
         }
         if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
             let Ok(common) = git_dir.join(common.trim()).canonicalize() else {
                 return false;
             };
-            if common.starts_with(live_store) {
+            if live_stores.iter().any(|store| common.starts_with(store)) {
                 return false;
             }
         }
         return true;
     }
     false
+}
+
+fn account_home() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // getpwuid_r reads the account database, independent of a caller's HOME.
+    let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0u8; 16384];
+    // SAFETY: record, result and the writable buffer remain valid for the call.
+    let status = unsafe { libc::getpwuid_r(libc::getuid(), record.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut result) };
+    if status != 0 || result.is_null() { return Err("cannot resolve account home".into()); }
+    // SAFETY: a successful lookup initialized record and returned its address.
+    let record = unsafe { record.assume_init() };
+    if record.pw_dir.is_null() { return Err("cannot resolve account home".into()); }
+    // SAFETY: pw_dir points into the live buffer returned by getpwuid_r.
+    let home = unsafe { std::ffi::CStr::from_ptr(record.pw_dir) }.to_str()?;
+    Ok(PathBuf::from(home).canonicalize()?)
+}
+
+fn validate_output(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = output.parent().ok_or("output needs a parent directory")?.canonicalize()?;
+    if output.file_name().is_none() || output.exists() { return Err("output must be a new file".into()); }
+    for ancestor in parent.ancestors() {
+        if ancestor.join(".git").exists() { return Err("output must be outside every git work tree".into()); }
+    }
+    let output = mast_harness::git_command().current_dir(&parent)
+        .args(["rev-parse", "--is-inside-work-tree"]).env("LC_ALL", "C")
+        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE").env_remove("GIT_CEILING_DIRECTORIES")
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output()?;
+    if output.status.success() || !String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
+        return Err("output must be outside every git work tree".into());
+    }
+    Ok(())
+}
+
+fn write_shape_and_remove_source(output: &Path, source: &Path, shape: &WorldShape) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(output)?;
+    file.write_all(&serde_json::to_vec_pretty(shape)?)?;
+    drop(file);
+    std::fs::remove_file(source)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = source.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        match std::fs::remove_file(sidecar) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_source(source: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::getuid() } {
+        return Err("source must be an owned, single-link regular file".into());
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = source.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        if std::fs::symlink_metadata(sidecar).is_ok() {
+            return Err("source backup must not have SQLite sidecars".into());
+        }
+    }
+    let source = source.canonicalize()?;
+    let parent = source.parent().ok_or("source needs a parent directory")?;
+    let parent_metadata = std::fs::metadata(parent)?;
+    if parent.parent() != Some(Path::new("/private/tmp"))
+        || !parent.file_name().is_some_and(|name| name.to_string_lossy().starts_with("ui-driver-shape."))
+        || parent_metadata.uid() != unsafe { libc::getuid() }
+        || parent_metadata.permissions().mode() & 0o777 != 0o700 {
+        return Err("source must be in an owned private shape directory".into());
+    }
+    Ok(source)
+}
+
+#[test]
+fn extraction_paths_refuse_git_outputs_and_hard_linked_sources() {
+    let root = tempfile::Builder::new().prefix("ui-driver-shape.").tempdir_in("/private/tmp").unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = root.path().join("docs.sqlite3");
+    std::fs::write(&source, b"fixture").unwrap();
+    assert!(validate_source(&source).is_ok(), "fixture source rejected: {:?}", validate_source(&source).err());
+    let alias = root.path().join("alias");
+    std::fs::hard_link(&source, &alias).unwrap();
+    assert!(validate_source(&source).is_err());
+    std::fs::remove_file(alias).unwrap();
+    assert!(validate_output(&root.path().join("shape.json")).is_ok());
+    let repo = root.path().join("repository");
+    std::fs::create_dir(&repo).unwrap();
+    let status = mast_harness::git_command().current_dir(&repo).args(["init", "-q"]).status().unwrap();
+    assert!(status.success());
+    assert!(validate_output(&repo.join("shape.json")).is_err());
+    let shape = WorldShape::medium();
+    let output = root.path().join("shape.json");
+    write_shape_and_remove_source(&output, &source, &shape).unwrap();
+    assert!(!source.exists());
+    assert_eq!(shape, serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap());
 }
 
 #[test]
@@ -74,13 +174,10 @@ fn extract_shape_from_backup() {
 }
 
 fn extract() -> Result<(), Box<dyn std::error::Error>> {
-    let source = PathBuf::from(std::env::var_os("MAST_SHAPE_SOURCE").ok_or("missing source")?)
-        .canonicalize()?;
-    if !source.starts_with("/private/tmp/ui-driver-shape") {
-        return Err("source must be a backup in the shape scratch directory".into());
-    }
+    let source = validate_source(&PathBuf::from(std::env::var_os("MAST_SHAPE_SOURCE").ok_or("missing source")?))?;
     let output = PathBuf::from(std::env::var_os("MAST_SHAPE_OUTPUT").ok_or("missing output")?);
-    let db = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    validate_output(&output)?;
+    let db = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let snapshot = |id: &str| -> rusqlite::Result<Option<Vec<u8>>> {
         db.query_row(
             "SELECT bytes FROM snapshots WHERE doc_id = ?1",
@@ -123,15 +220,19 @@ fn extract() -> Result<(), Box<dyn std::error::Error>> {
             .filter_map(|chat| chat.cwd.as_ref().map(PathBuf::from)),
     );
     let mut repos = BTreeMap::new();
-    let live_store = PathBuf::from(std::env::var_os("HOME").ok_or("missing home")?).join(".zeron");
+    let home = account_home()?;
+    let live_stores: Vec<_> = [".zeron", ".zeron-dev", ".mast", ".mast-dev", ".claude", ".codex"].into_iter().flat_map(|name| {
+        let path = home.join(name);
+        [Some(path.clone()), path.canonicalize().ok()].into_iter().flatten()
+    }).collect();
     for path in candidates {
-        if path.starts_with(&live_store) {
+        if live_stores.iter().any(|store| path.starts_with(store)) {
             continue;
         }
         let Ok(canonical) = path.canonicalize() else {
             continue;
         };
-        if canonical.starts_with(&live_store) || !safe_repository(&canonical, &live_store) {
+        if live_stores.iter().any(|store| canonical.starts_with(store)) || !safe_repository(&canonical, &live_stores) {
             continue;
         }
         let Some(common) = git(
@@ -224,6 +325,7 @@ fn extract() -> Result<(), Box<dyn std::error::Error>> {
             .count();
         shape.friction_reports += registry.friction_reports(&space.id).len();
     }
-    std::fs::write(output, serde_json::to_vec_pretty(&shape)?)?;
+    drop(db);
+    write_shape_and_remove_source(&output, &source, &shape)?;
     Ok(())
 }

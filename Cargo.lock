@@ -5474,6 +5474,7 @@ dependencies = [
  "gpui-base",
  "gpui_platform",
  "gpui_tokio",
+ "libc",
  "loro",
  "mast-doc",
  "mast-engine",
