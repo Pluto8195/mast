@@ -202,6 +202,23 @@ fn medium_world_materializes() {
             .map(|chat| core.workspace.chat_pr_links(&chat.id).unwrap().len())
             .sum();
         assert_eq!(links, shape.chat_pr_links);
+        for (number, state) in [(1, "open"), (2, "closed"), (3, "merged")] {
+            let url = format!("https://github.com/fixture/repository/pull/{number}");
+            let item_pr = core
+                .pr_ticket_cache
+                .request_pr_url(&url)
+                .flatten()
+                .expect("fixture item PR resolved");
+            assert_eq!(item_pr.state, state);
+            let link = mast_proto::ChatPrLink {
+                url,
+                source: mast_proto::ChatLinkSource::Manual,
+            };
+            let chat_pr = core
+                .pr_ticket_cache
+                .status_for_links(None, None, &[link], None);
+            assert_eq!(chat_pr.pr_links[0].detail.as_ref().unwrap().state, state);
+        }
         let service = mast_engine::work_outline::WorkOutlineService::new(core.workspace.clone());
         let snapshots: Vec<_> = world
             .spaces

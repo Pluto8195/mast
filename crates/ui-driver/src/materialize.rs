@@ -350,6 +350,13 @@ pub async fn materialize_engine(
 /// Build the whole world: repos first (chats point at worktrees), then stores.
 pub async fn materialize(scratch: &ScratchDirectories, world: &SmallWorld) -> Result<(), String> {
     materialize_repos(scratch, world).map_err(|e| e.to_string())?;
+    if let Some(shape) = &world.shape {
+        std::fs::write(
+            scratch.data().join("driver-pr-count"),
+            shape.chat_pr_links.max(shape.item_pr_refs).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     materialize_engine(scratch, world).await
 }
 

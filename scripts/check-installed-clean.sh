@@ -22,7 +22,7 @@ for package in packages:
 '
 cargo tree -p mast --target all -e normal,build -f '{p} [{f}]' --locked |
   python3 -c 'import os,sys; sys.stdout.write(sys.stdin.read().replace(os.getcwd(), "<workspace>"))' > "$tree_file"
-if grep -E 'mast-ui-driver v|\[([^]]*,)?(snapshot|test-support)(,|])' "$tree_file"; then
+if grep -E 'mast-ui-driver v|\[([^]]*,)?(snapshot|test-support|ui-driver)(,|])' "$tree_file"; then
   echo 'installed dependency graph contains driver or test features' >&2
   exit 1
 fi

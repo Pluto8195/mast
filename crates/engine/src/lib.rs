@@ -515,6 +515,38 @@ impl EngineCore {
             );
         }
         let pr_ticket_cache = pr_ticket_cache::PrTicketCache::new();
+        #[cfg(feature = "ui-driver")]
+        let driver_pr_count = match std::fs::read_to_string(data_dir.join("driver-pr-count")) {
+            Ok(count) => Some(count),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(feature = "ui-driver")]
+        if let Some(count) = driver_pr_count {
+            // This feature is test-only. Fail closed before invoking the stub:
+            // require the driver's guarded scratch root and a kernel network denial.
+            let root = std::env::var_os("MAST_DRIVER_ROOT")
+                .ok_or_else(|| EngineError::Other("missing driver scratch root".into()))?;
+            let root = std::path::PathBuf::from(root).canonicalize()?;
+            let data = data_dir.canonicalize()?;
+            let shim = std::env::var_os("MAST_SOAK_SHIM_DIR")
+                .ok_or_else(|| EngineError::Other("missing driver shim directory".into()))?;
+            let shim = std::path::PathBuf::from(shim).canonicalize()?;
+            let target = std::net::SocketAddr::from(([192, 0, 2, 1], 443));
+            let denied = matches!(
+                std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_secs(1)),
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+            );
+            if !soak || external_import_enabled || !data.starts_with(&root)
+                || shim != root.join("shims") || !denied {
+                return Err(EngineError::Other(
+                    "driver PR fixtures require the isolated driver sandbox".into(),
+                ));
+            }
+            let count = count.trim().parse()
+                .map_err(|_| EngineError::Other("invalid driver PR fixture count".into()))?;
+            pr_ticket_cache.load_driver_fixtures(count).map_err(EngineError::Other)?;
+        }
         pr_ticket_cache.set_linear(linear.clone(), workspace.clone());
         if !soak {
             pr_review_sync.spawn_sync_loop();

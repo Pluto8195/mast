@@ -7,6 +7,8 @@ publish.workspace = true
 
 [features]
 startup-bench = []
+# Test-only PR fixture loader used by mast-ui-driver.
+ui-driver = []
 
 [dependencies]
 mast-syntax.workspace = true

@@ -430,6 +430,25 @@ mod tests {
             .output()
             .unwrap();
         assert!(!output.status.success());
+        let output = std::process::Command::new(scratch.shims.join("gh"))
+            .args(["driver-fixtures", "3"])
+            .env_clear()
+            .env("MAST_DRIVER_STUB_LOG", &scratch.stub_log)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let states: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_slice::<serde_json::Value>(line).unwrap()["state"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(states, ["OPEN", "CLOSED", "MERGED"]);
         fs::remove_dir_all(&scratch.paths.root).unwrap();
     }
 
