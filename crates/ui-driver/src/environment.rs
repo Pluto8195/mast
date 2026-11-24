@@ -325,6 +325,7 @@ impl ScratchDirectories {
             .env("MAST_DRIVER_ACCOUNT_HOME", account_home)
             .env("MAST_DRIVER_STUB_LOG", &self.stub_log)
             .env("MAST_SOAK", "1")
+            .env("MAST_DISABLE_EXTERNAL_IMPORT", "1")
             .env("MAST_SOAK_SHIM_DIR", &self.shims)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("RUST_BACKTRACE", "1")
@@ -386,7 +387,9 @@ mod tests {
         let scratch = ScratchDirectories::create(&account).unwrap();
         let profile = fs::read_to_string(scratch.write_sandbox_profile(&account).unwrap()).unwrap();
         assert!(profile.contains("(deny network*)"));
-        assert!(profile.contains(".claude"));
+        for name in [".claude", ".codex", ".zeron"] {
+            assert!(profile.contains(&format!("{}/{name}", account.display())));
+        }
         for program in [
             "gh", "claude", "codex", "security", "npm", "node", "curl", "ssh",
         ] {
@@ -538,8 +541,10 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let account = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
-        fs::create_dir(account.join(".claude")).unwrap();
-        fs::write(account.join(".claude/fixture"), "private").unwrap();
+        for name in [".claude", ".codex", ".zeron"] {
+            fs::create_dir(account.join(name)).unwrap();
+            fs::write(account.join(name).join("fixture"), "private").unwrap();
+        }
         let scratch = ScratchDirectories::create(&account).unwrap();
         let profile = scratch.write_sandbox_profile(&account).unwrap();
         let result = std::process::Command::new("/usr/bin/sandbox-exec")
@@ -552,6 +557,8 @@ mod tests {
                 /usr/bin/touch "$DRIVER_ROOT/allowed" || exit 1
                 if /usr/bin/touch "$FAKE_ACCOUNT/denied" 2>/dev/null; then exit 2; fi
                 if /bin/cat "$FAKE_ACCOUNT/.claude/fixture" >/dev/null 2>&1; then exit 3; fi
+                if /bin/cat "$FAKE_ACCOUNT/.codex/fixture" >/dev/null 2>&1; then exit 4; fi
+                if /bin/cat "$FAKE_ACCOUNT/.zeron/fixture" >/dev/null 2>&1; then exit 5; fi
             "#,
             ])
             .env_clear()

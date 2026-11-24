@@ -48,6 +48,79 @@ fn unguarded_engine_open() {
     assert!(!dir.path().join("profiles").exists());
 }
 
+#[test]
+fn driver_requires_external_import_switch() {
+    if run_isolated("driver_requires_external_import_switch", false) {
+        return;
+    }
+    let output = std::process::Command::new("/usr/bin/env")
+        .args(["-u", "MAST_DISABLE_EXTERNAL_IMPORT"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "engine_open_without_import_switch"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "engine accepted a missing importer switch"
+    );
+}
+
+#[test]
+#[ignore = "launched inside the sandbox without the importer switch"]
+fn engine_open_without_import_switch() {
+    let scratch = ScratchDirectories::from_env().unwrap();
+    let error = match materialize::open_core(scratch.data()) {
+        Ok(_) => panic!("engine unexpectedly started without importer switch"),
+        Err(error) => error,
+    };
+    assert!(error.contains("MAST_DISABLE_EXTERNAL_IMPORT=1"));
+    assert!(!scratch.data().join("profiles").exists());
+}
+
+#[test]
+fn driver_disables_external_session_import() {
+    if run_isolated("driver_disables_external_session_import", false) {
+        return;
+    }
+    assert_eq!(
+        std::env::var("MAST_DISABLE_EXTERNAL_IMPORT").as_deref(),
+        Ok("1")
+    );
+    let scratch = ScratchDirectories::create(&account()).unwrap();
+    let runtime = rt();
+    runtime.block_on(async {
+        let core = materialize::open_core(scratch.data()).unwrap();
+        let importer = &core.external_import;
+        let disabled = |error: Option<mast_engine::EngineError>| {
+            assert!(error.is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("external session import is disabled")
+            }));
+        };
+        disabled(importer.scan().err());
+        disabled(importer.import("fixture", "fixture", scratch.root()).err());
+        disabled(importer.sync("fixture").err());
+        disabled(importer.sync_stale_imports().err());
+        disabled(importer.repair_missing_timestamps().err());
+        disabled(importer.repair_missing_config().err());
+        disabled(importer.repair_missing_titles(&core.context_usage).err());
+        disabled(importer.repair_junk_imports().err());
+        disabled(importer.repair_missing_links(&core.context_usage).err());
+        disabled(importer.transcript_path_for("fixture").err());
+        disabled(importer.auto_adopt_external_sessions().err());
+        disabled(importer.bulk_import_from_session_canvas(|_| {}).err());
+        core.shutdown().await;
+    });
+    assert!(
+        !scratch
+            .data()
+            .join("profiles/local/external_import_cursors")
+            .exists()
+    );
+    finish(scratch);
+}
+
 /// Engine startup must always be guarded: otherwise background import can
 /// inspect the account's real agent sessions while a fixture is being built.
 fn run_isolated(name: &str, private_shape: bool) -> bool {

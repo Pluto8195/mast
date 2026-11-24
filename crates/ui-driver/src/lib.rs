@@ -17,6 +17,9 @@ pub fn preflight() -> Result<(), String> {
         return Err("driver requires MAST_SOAK=1".to_owned());
     }
     mast_harness::soak::preflight()?;
+    if std::env::var("MAST_DISABLE_EXTERNAL_IMPORT").as_deref() != Ok("1") {
+        return Err("driver requires MAST_DISABLE_EXTERNAL_IMPORT=1".into());
+    }
     // A timeout or a disconnected host does not prove that a sandbox denied
     // network access. Require the explicit denial that startup_guard checks.
     let target = std::net::SocketAddr::from(([192, 0, 2, 1], 443));

@@ -9,6 +9,10 @@ extractor opens only the backup and emits aggregate counts. It also reads local
 Git metadata to count repositories, worktrees and branches. Keep the resulting
 shape outside this public repository.
 
+Driver engine startup requires the sandbox and `MAST_DISABLE_EXTERNAL_IMPORT=1`.
+The switch disables external-session import and its background repair jobs;
+the sandbox also denies reads of the account's live stores.
+
 ```sh
 mkdir -p /private/tmp/ui-driver-shape
 sqlite3 -readonly "$HOME/.zeron/profiles/local/docs.sqlite3" '.backup /private/tmp/ui-driver-shape/docs.sqlite3'
