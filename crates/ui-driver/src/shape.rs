@@ -50,6 +50,35 @@ pub struct WorldShape {
     pub branches_per_repository_max: usize,
 }
 
+impl WorldShape {
+    /// Fixed, synthetic dimensions for the medium preset.
+    pub fn medium() -> Self {
+        Self {
+            spaces: 20,
+            repositories: 3,
+            worktrees_per_repository_max: 12,
+            worktrees_per_repository_median: 3,
+            chats_per_space_max: 20,
+            chats_per_space_median: 15,
+            chats: 300,
+            archived_chats: 30,
+            pending_items: 150,
+            active_items: 150,
+            completed_items: 100,
+            outline_depth: 4,
+            chat_pr_links: 300,
+            item_pr_refs: 60,
+            open_requests: 30,
+            resolved_requests: 20,
+            friction_reports: 10,
+            messages_per_chat_median: 4,
+            messages_per_chat_p90: 12,
+            branches_per_repository_median: 8,
+            branches_per_repository_max: 16,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorldShape;
@@ -58,6 +87,24 @@ mod tests {
     fn shape_round_trip() {
         let json = r#"{"spaces":2,"repositories":1,"worktrees_per_repository_max":3,"worktrees_per_repository_median":3,"chats_per_space_max":4,"chats_per_space_median":2,"chats":6,"archived_chats":1,"pending_items":2,"active_items":3,"completed_items":1,"outline_depth":3,"chat_pr_links":4,"item_pr_refs":2,"open_requests":1,"resolved_requests":1,"friction_reports":1,"messages_per_chat_median":2,"messages_per_chat_p90":5,"branches_per_repository_median":4,"branches_per_repository_max":4}"#;
         let shape: WorldShape = serde_json::from_str(json).unwrap();
-        assert_eq!(shape, serde_json::from_str(&serde_json::to_string(&shape).unwrap()).unwrap());
+        assert_eq!(
+            shape,
+            serde_json::from_str(&serde_json::to_string(&shape).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn medium_dimensions() {
+        let shape = WorldShape::medium();
+        assert_eq!(shape.spaces, 20);
+        assert_eq!(shape.repositories, 3);
+        assert_eq!(shape.worktrees_per_repository_max, 12);
+        assert_eq!(shape.chats, 300);
+        assert_eq!(
+            shape.pending_items + shape.active_items + shape.completed_items,
+            400
+        );
+        assert_eq!(shape.chat_pr_links, 300);
+        assert_eq!(shape.open_requests, 30);
     }
 }
