@@ -306,7 +306,11 @@ pub async fn materialize_engine(
         }
     }
     for (index, request) in world.requests.iter().enumerate() {
-        let operation = format!("{}-request-{index}", world.items[0].operation_id);
+        let operation = if world.shape.is_some() {
+            format!("fixture-{:016x}-request-{index}", world.seed)
+        } else {
+            format!("{}-request-{index}", world.items[0].operation_id)
+        };
         let created = outline(
             &client,
             json!({"op": "createUserActionRequest", "workItemId": world.items[request.item].id,
