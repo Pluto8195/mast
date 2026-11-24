@@ -10,6 +10,36 @@ use mast_ui_driver::world::SmallWorld;
 
 static ISOLATED_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn engine_open_rejects_unguarded_process() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "unguarded_engine_open",
+            "--nocapture",
+        ])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "unguarded engine rejection test failed"
+    );
+}
+
+#[test]
+#[ignore = "launched with a cleared environment by engine_open_rejects_unguarded_process"]
+fn unguarded_engine_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = match materialize::open_core(dir.path()) {
+        Ok(_) => panic!("unguarded engine unexpectedly started"),
+        Err(error) => error,
+    };
+    assert!(error.contains("MAST_SOAK=1"));
+    assert!(!dir.path().join("profiles").exists());
+}
+
 /// Engine startup must always be guarded: otherwise background import can
 /// inspect the account's real agent sessions while a fixture is being built.
 fn run_isolated(name: &str, private_shape: bool) -> bool {
